@@ -1,0 +1,1 @@
+"""TalkTracker desktop application."""

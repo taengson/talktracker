@@ -1,0 +1,13 @@
+# Local Python environment
+.venv/
+
+# Downloaded model weights are large and machine-local.
+models/*
+!models/.gitkeep
+!models/README.md
+
+# Runtime artifacts
+outputs/
+tmp/
+__pycache__/
+*.py[cod]

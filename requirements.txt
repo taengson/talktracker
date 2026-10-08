@@ -1,0 +1,10 @@
+# Local model runtime
+# The CPU index keeps this project usable on machines without a suitable NVIDIA GPU.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu
+torchaudio==2.11.0+cpu
+numpy>=1.26,<3
+transformers
+accelerate
+huggingface_hub
+faster-whisper

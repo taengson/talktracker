@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TalkTracker 개발 계획서</title>
+  <style>
+    :root {
+      --ink: #18212f;
+      --muted: #5c6b7d;
+      --line: #dbe2ea;
+      --paper: #ffffff;
+      --ground: #f5f7fb;
+      --navy: #183b5c;
+      --blue: #246bce;
+      --cyan: #dff4f7;
+      --green: #dff3e8;
+      --amber: #fff0c8;
+      --rose: #ffe5e9;
+      --shadow: 0 10px 28px rgba(24, 43, 65, .08);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--ground);
+      font-family: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+      line-height: 1.7;
+      word-break: keep-all;
+    }
+
+    .hero {
+      color: white;
+      background: linear-gradient(120deg, #102c46 0%, #1c5a8e 100%);
+      padding: 74px 24px 64px;
+    }
+    .container { width: min(1080px, 100%); margin: 0 auto; }
+    .eyebrow { margin: 0 0 10px; color: #a8e8f0; font-size: .88rem; font-weight: 800; letter-spacing: .12em; }
+    h1 { margin: 0; font-size: clamp(2.25rem, 6vw, 4.75rem); letter-spacing: -.055em; line-height: 1; }
+    .lead { max-width: 740px; margin: 22px 0 0; color: #dcecf7; font-size: clamp(1rem, 2vw, 1.25rem); }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 28px; }
+    .pill { padding: 6px 12px; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; background: rgba(255,255,255,.11); font-size: .88rem; }
+
+    .page { padding: 34px 24px 76px; }
+    .layout { display: grid; grid-template-columns: 225px minmax(0, 1fr); gap: 28px; align-items: start; }
+    nav { position: sticky; top: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: rgba(255,255,255,.75); }
+    nav strong { display: block; margin-bottom: 8px; font-size: .9rem; }
+    nav a { display: block; padding: 5px 0; color: var(--muted); font-size: .9rem; text-decoration: none; }
+    nav a:hover { color: var(--blue); }
+    main { min-width: 0; }
+    section { margin-bottom: 24px; padding: 30px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: var(--shadow); }
+    h2 { margin: 0 0 16px; font-size: 1.45rem; letter-spacing: -.03em; }
+    h3 { margin: 26px 0 9px; font-size: 1.07rem; }
+    p { margin: 0 0 14px; }
+    ul, ol { margin: 8px 0; padding-left: 1.25rem; }
+    li + li { margin-top: 5px; }
+
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .summary > div { padding: 17px; border-radius: 14px; background: #f1f7ff; }
+    .summary strong { display: block; margin-bottom: 3px; color: var(--navy); font-size: .93rem; }
+    .summary span { color: var(--muted); font-size: .92rem; }
+
+    .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; align-items: stretch; margin-top: 18px; }
+    .flow-step { position: relative; padding: 15px 12px; border-radius: 14px; background: #eef5fb; text-align: center; font-weight: 800; font-size: .9rem; }
+    .flow-step:not(:last-child)::after { position: absolute; z-index: 1; top: 50%; right: -10px; width: 20px; color: var(--blue); content: "→"; font-size: 1.2rem; transform: translateY(-50%); }
+    .split { grid-column: span 2; background: var(--cyan); }
+    .merge { grid-column: span 2; background: var(--green); }
+    .note { margin-top: 16px; padding: 14px 16px; border-left: 4px solid #e5a21a; border-radius: 0 10px 10px 0; background: #fff8e6; color: #614b15; }
+
+    table { width: 100%; overflow: hidden; border: 1px solid var(--line); border-collapse: separate; border-spacing: 0; border-radius: 12px; font-size: .94rem; }
+    th, td { padding: 12px 14px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--navy); background: #f0f5fa; font-weight: 800; }
+    tr:last-child td { border-bottom: 0; }
+    code { padding: 2px 5px; border-radius: 5px; background: #edf2f7; color: #273a50; font-family: "Cascadia Code", Consolas, monospace; font-size: .9em; }
+    pre { overflow-x: auto; margin: 16px 0 0; padding: 16px; border-radius: 12px; background: #132333; color: #d5e6f4; line-height: 1.55; }
+
+    .phase-list { display: grid; gap: 14px; }
+    .phase { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 14px; padding: 17px; border: 1px solid var(--line); border-radius: 14px; }
+    .phase-number { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 50%; color: #fff; background: var(--blue); font-weight: 900; }
+    .phase h3 { margin: 0 0 5px; }
+    .phase p { margin-bottom: 7px; color: var(--muted); }
+    .done { margin: 10px 0 0; padding: 9px 11px; border-radius: 8px; background: #edf8f2; color: #225b3c; font-size: .9rem; }
+    .done strong { margin-right: 6px; }
+
+    .risk-high { background: var(--rose); }
+    .risk-medium { background: var(--amber); }
+    .risk-low { background: var(--cyan); }
+    .risk-tag { display: inline-block; margin-right: 7px; padding: 2px 7px; border-radius: 999px; font-size: .75rem; font-weight: 800; }
+    .risk-high .risk-tag { color: #8a1831; background: #ffc7d2; }
+    .risk-medium .risk-tag { color: #77520b; background: #ffe39a; }
+    .risk-low .risk-tag { color: #135b6c; background: #bfeaf0; }
+
+    .checklist { display: grid; gap: 8px; }
+    .check { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; background: #f5f8fb; }
+    .box { width: 18px; height: 18px; flex: 0 0 auto; margin-top: 4px; border: 2px solid #99aabd; border-radius: 5px; }
+    footer { margin-top: 14px; color: var(--muted); text-align: center; font-size: .84rem; }
+
+    @media (max-width: 800px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; display: none; }
+      .summary { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: 1fr; }
+      .flow-step, .split, .merge { grid-column: auto; }
+      .flow-step:not(:last-child)::after { top: auto; right: 50%; bottom: -16px; transform: translateX(50%) rotate(90deg); }
+      section { padding: 22px; }
+      .hero { padding: 54px 24px 48px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <p class="eyebrow">LOCAL SPEAKER DIARIZATION &amp; TRANSCRIPTION</p>
+      <h1>TalkTracker</h1>
+      <p class="lead">로컬 음성 파일에서 <strong>누가, 언제, 무엇을 말했는지</strong>를 정리하는 개인용 화자 분리·전사 도구 개발 계획서입니다.</p>
+      <div class="pill-row">
+        <span class="pill">Whisper large-v3-turbo</span>
+        <span class="pill">NVIDIA Nemotron-3-Diarization</span>
+        <span class="pill">오프라인 사용</span>
+        <span class="pill">Markdown · HTML</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="page container">
+    <div class="layout">
+      <nav aria-label="문서 목차">
+        <strong>목차</strong>
+        <a href="#goal">목표와 범위</a>
+        <a href="#stack">기술 선택</a>
+        <a href="#flow">처리 흐름</a>
+        <a href="#roadmap">개발 단계</a>
+        <a href="#rules">시간 결합 규칙</a>
+        <a href="#risks">위험과 대응</a>
+        <a href="#mvp">MVP 완료 기준</a>
+      </nav>
+
+      <main>
+        <section id="goal">
+          <h2>목표와 범위</h2>
+          <div class="summary">
+            <div><strong>입력</strong><span>회의·인터뷰·통화 등 로컬 음성 파일</span></div>
+            <div><strong>처리</strong><span>화자 구간과 전사를 시간 기준으로 결합</span></div>
+            <div><strong>출력</strong><span>화자별 대화 기록, Markdown, 인쇄용 HTML</span></div>
+          </div>
+          <h3>이번에 만드는 것</h3>
+          <ul>
+            <li>한국어 우선, 다국어 음성도 처리하는 로컬 파일 전사</li>
+            <li>익명 화자 라벨과 시간 구간을 포함한 대본</li>
+            <li>화자 이름 수정과 Markdown·HTML 문서 저장</li>
+            <li>모델을 내려받은 뒤 인터넷 없이 실행할 수 있는 구조</li>
+          </ul>
+          <h3>이번 범위에서 제외할 것</h3>
+          <ul>
+            <li>실시간 마이크 전사, 실제 인물 자동 식별, 클라우드 업로드·공유, 모바일 앱</li>
+          </ul>
+        </section>
+
+        <section id="stack">
+          <h2>핵심 기술 선택</h2>
+          <table>
+            <thead><tr><th>역할</th><th>선택</th><th>선택 이유</th></tr></thead>
+            <tbody>
+              <tr><td>음성 전사</td><td><code>whisper-large-v3-turbo</code> + faster-whisper CPU <code>int8</code></td><td>Turbo의 다국어 품질을 유지하면서 CPU 전사 속도와 메모리 사용량을 낮춘다.</td></tr>
+              <tr><td>화자 분리</td><td><code>Nemotron-3-Diarization</code></td><td>최대 8명의 화자 구간과 동시 발화를 다룬다.</td></tr>
+              <tr><td>실행 환경</td><td>Python</td><td>두 모델의 공식 라이브러리 생태계와 잘 맞는다.</td></tr>
+              <tr><td>오디오 준비</td><td>FFmpeg</td><td>다양한 입력을 16 kHz 모노 WAV로 일관되게 변환한다.</td></tr>
+              <tr><td>사용자 화면</td><td>Python 데스크톱 UI (Tkinter)</td><td>브라우저 없이 파일 선택, 진행 상태, 결과 편집과 내보내기를 단순하게 제공한다.</td></tr>
+            </tbody>
+          </table>
+          <p class="note">Nemotron의 기본 결과는 <code>화자 1</code>, <code>화자 2</code> 같은 익명 라벨입니다. 결과 화면에서 사람이 알아보기 쉬운 이름으로 바꿀 수 있게 합니다.</p>
+        </section>
+
+        <section id="flow">
+          <h2>처리 흐름</h2>
+          <div class="flow" aria-label="TalkTracker 처리 단계">
+            <div class="flow-step">음성 파일<br>선택</div>
+            <div class="flow-step">16 kHz 모노<br>정규화</div>
+            <div class="flow-step split">화자 구간<br><small>Nemotron</small></div>
+            <div class="flow-step split">전사와 단어 시간<br><small>Whisper Turbo</small></div>
+            <div class="flow-step merge">시간 축 결합<br>· 구간 정리</div>
+          </div>
+          <div class="flow" style="grid-template-columns: 1fr; margin-top: 10px;">
+            <div class="flow-step" style="background:#edf2f7;">화자별 대화 기록 검토 → Markdown / HTML 문서 저장</div>
+          </div>
+          <pre>{
+  "start": 72.4,
+  "end": 76.2,
+  "speaker": "화자 1",
+  "text": "다음 안건으로 넘어가겠습니다.",
+  "overlap": false
+}</pre>
+          <p class="note">동시 발화가 감지되면 한 사람으로 강제 통합하지 않고, 두 화자 라벨을 함께 보존합니다.</p>
+        </section>
+
+        <section id="roadmap">
+          <h2>개발 단계</h2>
+          <div class="phase-list">
+            <article class="phase">
+              <div class="phase-number">0</div>
+              <div>
+                <h3>환경 검증</h3>
+                <p>현재 PC에서 두 모델을 실제로 불러오고, 1~5분 길이의 파일을 끝까지 처리할 수 있는지 먼저 확인합니다.</p>
+                <ul><li>Windows·Python·FFmpeg·PyTorch 및 CPU/GPU 상태 확인</li><li>Nemotron 다운로드와 Whisper Turbo 단독 실행 확인</li><li>CPU 및 NVIDIA GPU에서 처리 시간·메모리 기록</li></ul>
+                <p class="done"><strong>완료 기준</strong> 하나의 로컬 WAV에서 전사와 화자 구간이 모두 생성된다.</p>
+              </div>
+            </article>
+            <article class="phase">
+              <div class="phase-number">1</div>
+              <div>
+                <h3>처리 엔진 프로토타입</h3>
+                <p>명령 한 번으로 파일에서 화자별 대화 기록을 생성합니다.</p>
+                <ul><li>파일 검사·오디오 변환</li><li>Whisper 단어/문장 시간 정보와 Nemotron 화자 구간 추출</li><li>시간 겹침 기준 화자 배정, 짧은 구간 병합, 동시 발화 보존</li></ul>
+                <p class="done"><strong>완료 기준</strong> 화자·시작/종료 시각·전사문을 가진 내부 대화 기록이 생성된다.</p>
+              </div>
+            </article>
+            <article class="phase">
+              <div class="phase-number">2</div>
+              <div>
+                <h3>결과 내보내기</h3>
+                <p>읽기용 대본, 자막, 재처리용 원본 데이터를 각각 제공합니다.</p>
+                <ul><li>Markdown: 메모 앱이나 문서 도구에서 계속 편집할 수 있는 대화 기록</li><li>HTML: 브라우저에서 편하게 읽고 인쇄 또는 PDF로 보관할 수 있는 문서</li></ul>
+                <p class="done"><strong>완료 기준</strong> 두 문서의 시간순·화자 라벨·본문이 일관된다.</p>
+              </div>
+            </article>
+            <article class="phase">
+              <div class="phase-number">3</div>
+              <div>
+                <h3>로컬 사용자 화면</h3>
+                <p>터미널을 쓰지 않고도 파일 선택부터 내보내기까지 마칩니다.</p>
+                <ul><li>드래그 앤 드롭, 처리 단계·진행 상태 표시</li><li>화자 라벨 이름 변경, 시간 기준 대화 기록 검토</li><li>Markdown 저장, HTML 문서 열기, 인쇄 또는 PDF 저장</li><li>모델·CPU/GPU 설정은 사용자가 고르지 않고 앱이 알아서 처리</li></ul>
+                <p class="done"><strong>완료 기준</strong> 처음 쓰는 사용자도 파일 하나를 넣어 결과를 저장할 수 있다.</p>
+              </div>
+            </article>
+            <article class="phase">
+              <div class="phase-number">4</div>
+              <div>
+                <h3>품질·성능 보완</h3>
+                <p>실제 회의와 인터뷰에서 발생하는 겹침·잡음·긴 파일 문제를 다듬습니다.</p>
+                <ul><li>한국어 회의, 인터뷰, 다인 대화, 잡음 샘플 검증</li><li>Turbo와 large-v3의 품질·처리 시간 비교</li><li>중간 결과 보존과 실패 후 재시도</li></ul>
+                <p class="done"><strong>완료 기준</strong> 대표 샘플별 한계와 권장 설정이 사용자 문서에 정리된다.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="rules">
+          <h2>화자-전사 시간 결합 규칙</h2>
+          <ol>
+            <li>Whisper가 만든 단어 또는 문장의 시작·종료 시간을 읽는다.</li>
+            <li>같은 시간대의 Nemotron 화자 구간을 찾는다.</li>
+            <li>겹치는 시간이 가장 긴 화자를 기본 화자로 지정한다.</li>
+            <li>두 화자가 충분히 겹치면 두 라벨과 <code>overlap: true</code>를 기록한다.</li>
+            <li>인접한 같은 화자의 짧은 조각은 문장 흐름을 해치지 않는 범위에서 병합한다.</li>
+            <li>어떤 화자 구간에도 속하지 않는 전사문은 <code>알 수 없음</code>으로 보존한다.</li>
+          </ol>
+        </section>
+
+        <section id="risks">
+          <h2>주요 위험과 대응</h2>
+          <table>
+            <thead><tr><th>위험</th><th>대응</th></tr></thead>
+            <tbody>
+              <tr class="risk-high"><td><span class="risk-tag">우선</span>Windows에서 Nemotron 의존성 호환 문제</td><td>개발 시작 전 단계 0에서 실제 PC로 검증하고, Python/Transformers 경로를 우선 사용한다.</td></tr>
+              <tr class="risk-medium"><td><span class="risk-tag">주의</span>GPU가 없거나 VRAM 부족</td><td>CPU 모드를 제공하고 Turbo를 기본으로 한다. 필요하면 <code>medium</code>을 대안으로 둔다.</td></tr>
+              <tr class="risk-medium"><td><span class="risk-tag">주의</span>동시 발화·잡음</td><td>겹침을 보존하고, 결과 화면에서 화자 라벨과 문장을 수정할 수 있게 한다.</td></tr>
+              <tr class="risk-low"><td><span class="risk-tag">관리</span>화자 번호가 파일마다 달라짐</td><td>파일별 익명 라벨을 기본으로 하고 사용자가 이름을 붙이게 한다.</td></tr>
+              <tr class="risk-medium"><td><span class="risk-tag">주의</span>긴 파일에서 실패·메모리 부족</td><td>청크 처리와 단계별 임시 결과 저장, 재시도 기능을 둔다.</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="mvp">
+          <h2>MVP 완료 기준</h2>
+          <div class="checklist">
+            <div class="check"><span class="box" aria-hidden="true"></span><span>사용자가 지원되는 로컬 음성 파일을 선택한다.</span></div>
+            <div class="check"><span class="box" aria-hidden="true"></span><span>TalkTracker가 화자 라벨, 시간 정보, 전사문이 포함된 결과를 만든다.</span></div>
+            <div class="check"><span class="box" aria-hidden="true"></span><span>사용자가 <code>화자 1</code> 같은 라벨을 원하는 이름으로 바꾼다.</span></div>
+            <div class="check"><span class="box" aria-hidden="true"></span><span>사용자가 Markdown 또는 HTML 문서로 결과를 저장한다.</span></div>
+            <div class="check"><span class="box" aria-hidden="true"></span><span>한 번 설치·다운로드한 뒤에는 인터넷 연결 없이 이 흐름을 재현한다.</span></div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <footer>TalkTracker · Development Plan · 2026-10-08</footer>
+  </div>
+</body>
+</html>
