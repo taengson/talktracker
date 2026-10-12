@@ -445,16 +445,40 @@ class AnalysisEngine:
             model = self._load_cpu_fallback(WhisperModel, error, progress)
 
         try:
-            return self._collect_transcript(model, normalized_audio, should_cancel)
+            return self._collect_transcript(
+                model,
+                normalized_audio,
+                should_cancel,
+                word_timestamps=self._uses_word_timestamps(),
+            )
         except (OSError, RuntimeError, ValueError) as error:
             cpu_model = self._load_cpu_fallback(WhisperModel, error, progress)
-            return self._collect_transcript(cpu_model, normalized_audio, should_cancel)
+            return self._collect_transcript(
+                cpu_model,
+                normalized_audio,
+                should_cancel,
+                word_timestamps=self._uses_word_timestamps(),
+            )
+
+    def _uses_word_timestamps(self) -> bool:
+        """Return whether to request Whisper's optional word alignment pass.
+
+        The app always has Whisper segment timings, which are sufficient to
+        match a transcript to Nemotron speaker turns.  On some Linux CUDA
+        builds, the Large-v3 cross-attention word-alignment call fails inside
+        CTranslate2 after decoding.  Skip only that optional pass for Large-v3
+        so the GPU-only accuracy profile remains usable.
+        """
+
+        return self.whisper_profile.key != "large-v3"
 
     def _collect_transcript(
         self,
         model: Any,
         normalized_audio: Path,
         should_cancel: CancelCallback | None,
+        *,
+        word_timestamps: bool,
     ) -> tuple[list[TranscriptChunk], bool]:
         # Automatic language detection in the current CTranslate2 Large-v3
         # runtime can fail with a JSON type error on some CUDA environments.
@@ -464,7 +488,7 @@ class AnalysisEngine:
         language = os.environ.get("TALKTRACKER_LANGUAGE", DEFAULT_TRANSCRIPTION_LANGUAGE).strip() or None
         options: dict[str, Any] = {
             "beam_size": 5,
-            "word_timestamps": True,
+            "word_timestamps": word_timestamps,
             "vad_filter": True,
             "condition_on_previous_text": False,
         }

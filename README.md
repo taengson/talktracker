@@ -86,6 +86,8 @@ Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper
 
 > **한국어 전사 기본값:** TalkTracker는 한국어 녹음을 기본 대상으로 하므로 Whisper에 한국어를 명시합니다. 이는 일부 Linux CUDA 환경에서 Large-v3의 자동 언어 감지 중 발생하는 오류를 피합니다. 다른 한 언어의 녹음만 처리하려면 GUI를 실행하기 전에 `TALKTRACKER_LANGUAGE=en`처럼 [Whisper 언어 코드](https://github.com/openai/whisper/blob/main/whisper/tokenizer.py)를 지정할 수 있습니다. 자동 감지가 꼭 필요하면 `TALKTRACKER_LANGUAGE=`로 빈 값으로 설정할 수 있지만, Large-v3 CUDA에서는 권장하지 않습니다.
 
+> **Large-v3 CUDA 호환 모드:** 일부 Linux CUDA 환경에서 Large-v3의 단어 단위 타임스탬프 정렬이 CTranslate2 오류로 끝날 수 있어, Large-v3는 전사 구간 단위 시간으로 화자를 연결합니다. 대화 내용과 화자 구분은 그대로 만들며, Small·Turbo는 단어 단위 시간을 계속 사용합니다.
+
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 
 ## 처리 순서
