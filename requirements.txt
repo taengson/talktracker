@@ -1,18 +1,14 @@
 # Local model runtime
-# Whisper GPU execution is handled by CTranslate2. PyTorch is used for
-# diarization, and PyPI supplies the same compatible runtime on Linux x86/ARM.
+# Whisper GPU execution is handled by CTranslate2.  Windows and Linux use
+# PyTorch/Transformers for diarization; macOS uses the project-local native
+# NeMo-Speech.cpp runtime with Nemotron's official GGUF model instead.
 torch==2.14.1 ; platform_system != "Darwin"
-# PyTorch 2.2.2 is the latest release that still ships macOS Intel wheels.
-# It also runs on Apple Silicon and TalkTracker deliberately uses the CPU path
-# on macOS, so one compatible pair is more reliable than architecture-specific
-# latest releases.
-torch==2.2.2 ; platform_system == "Darwin"
+numpy>=1.26,<3
 # TalkTracker does not import torchaudio; omitting it avoids an unavailable
 # current Linux ARM64 wheel without changing the application runtime.
-numpy>=1.26,<3
-librosa>=0.10.2
-transformers
-accelerate
+librosa>=0.10.2 ; platform_system != "Darwin"
+transformers>=4.48 ; platform_system != "Darwin"
+accelerate ; platform_system != "Darwin"
 huggingface_hub
 faster-whisper
 # Keep the Python wheel and the optional Linux CUDA source build on the same

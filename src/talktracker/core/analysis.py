@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import gc
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import wave
 from collections.abc import Callable
@@ -13,8 +15,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+
+# Nemotron's Python integration requires a recent PyTorch/Transformers pair
+# that has no compatible Intel macOS PyTorch wheel.  On macOS we use NVIDIA's
+# native NeMo-Speech.cpp runtime and its bundled GGUF model instead.  Keep the
+# Python integration for Windows and Linux, where the existing setup supports
+# it.
+IS_MACOS = sys.platform == "darwin"
+if not IS_MACOS:
+    import torch
+    from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
 from .models import WhisperProfile, WhisperRuntime, get_cpu_runtime, get_whisper_profile, get_whisper_runtime
 
@@ -130,7 +140,7 @@ class AnalysisEngine:
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
 
             self._notify(progress, 15, "화자 구간을 분석하고 있습니다…")
-            speaker_segments = self._diarize(audio)
+            speaker_segments = self._diarize(normalized, audio)
             if on_diarization:
                 on_diarization(speaker_segments, duration)
             self._release_memory()
@@ -168,12 +178,21 @@ class AnalysisEngine:
                     self.project_root / "models" / self.whisper_runtime.folder,
                     "model.bin",
                 ),
-                ("Nemotron", self.nemotron_dir, "model.safetensors"),
+                (
+                    "Nemotron",
+                    self.nemotron_dir,
+                    "Nemotron-3-Diarization.q8_0.gguf" if IS_MACOS else "model.safetensors",
+                ),
             )
             if not (directory / weight_file).is_file()
         ]
         if missing:
             raise ProcessingError(f"로컬 모델이 준비되지 않았습니다: {', '.join(missing)}")
+        if IS_MACOS and not self._nemo_speech_binary():
+            raise ProcessingError(
+                "macOS 화자 분리 실행기가 준비되지 않았습니다. "
+                "scripts/macos/Install-Dependencies.sh를 다시 실행해 주세요."
+            )
 
     def _normalise_audio(self, source: Path, destination: Path) -> None:
         ffmpeg = shutil.which("ffmpeg")
@@ -224,7 +243,12 @@ class AnalysisEngine:
             raise ProcessingError("음성 파일에 분석할 소리가 없습니다.")
         return audio, frame_count / SAMPLE_RATE
 
-    def _diarize(self, audio: np.ndarray) -> list[SpeakerSegment]:
+    def _diarize(self, normalized_audio: Path, audio: np.ndarray) -> list[SpeakerSegment]:
+        if IS_MACOS:
+            return self._diarize_with_nemo_speech(normalized_audio)
+        return self._diarize_with_transformers(audio)
+
+    def _diarize_with_transformers(self, audio: np.ndarray) -> list[SpeakerSegment]:
         try:
             processor = AutoProcessor.from_pretrained(str(self.nemotron_dir), local_files_only=True)
             model = AutoModelForAudioFrameClassification.from_pretrained(
@@ -257,6 +281,106 @@ class AnalysisEngine:
                 speaker = f"화자 {int(speaker_index) + 1}"
             except (TypeError, ValueError):
                 speaker = f"화자 {speaker_index}"
+            segments.append(SpeakerSegment(start=start, end=end, speaker=speaker))
+        return segments
+
+    def _nemo_speech_binary(self) -> Path | None:
+        """Find the project-local NeMo-Speech.cpp CLI on macOS.
+
+        The installer keeps this native dependency under `.tools` rather than
+        modifying the user's shell profile.  An environment variable and PATH
+        lookup are retained for advanced users who manage the CLI themselves.
+        """
+
+        configured = os.environ.get("TALKTRACKER_NEMO_SPEECH")
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            self.project_root / ".tools" / "nemo-speech" / "bin" / "nemo-speech",
+        ]
+        path_binary = shutil.which("nemo-speech")
+        if path_binary:
+            candidates.append(Path(path_binary))
+        for candidate in candidates:
+            if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return None
+
+    def _diarize_with_nemo_speech(self, normalized_audio: Path) -> list[SpeakerSegment]:
+        """Run the native GGUF Nemotron runtime and read its RTTM result."""
+
+        executable = self._nemo_speech_binary()
+        model = self.nemotron_dir / "Nemotron-3-Diarization.q8_0.gguf"
+        if not executable:
+            raise ProcessingError(
+                "macOS 화자 분리 실행기를 찾지 못했습니다. "
+                "scripts/macos/Install-Dependencies.sh를 다시 실행해 주세요."
+            )
+        if not model.is_file():
+            raise ProcessingError(
+                "Nemotron GGUF 화자 분리 모델이 없습니다. "
+                "로컬 모델 관리에서 모델 다운로드를 다시 실행해 주세요."
+            )
+
+        rttm_output = normalized_audio.with_suffix(".rttm")
+        # A temporary workspace is normally fresh, but do not let a leftover
+        # RTTM file make the native CLI reject an otherwise valid retry.
+        rttm_output.unlink(missing_ok=True)
+        command = [
+            str(executable),
+            "diarize",
+            str(normalized_audio),
+            "--model",
+            str(model),
+            "--format",
+            "rttm",
+            "--output",
+            str(rttm_output),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError as error:
+            raise ProcessingError(f"macOS 화자 분리 실행기를 시작하지 못했습니다. {error}") from error
+
+        if completed.returncode != 0 or not rttm_output.is_file():
+            details = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+            last_line = details[-1] if details else "실행 결과를 받지 못했습니다."
+            raise ProcessingError(f"Nemotron 화자 분리를 완료하지 못했습니다. {last_line}")
+
+        return self._parse_rttm(rttm_output)
+
+    @staticmethod
+    def _parse_rttm(rttm_file: Path) -> list[SpeakerSegment]:
+        """Translate standard RTTM speaker turns into the application's labels."""
+
+        segments: list[SpeakerSegment] = []
+        speaker_labels: dict[str, str] = {}
+        try:
+            lines = rttm_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as error:
+            raise ProcessingError(f"화자 분리 결과 파일을 읽지 못했습니다. {error}") from error
+
+        for line in lines:
+            columns = line.split()
+            if len(columns) < 8 or columns[0].upper() != "SPEAKER":
+                continue
+            try:
+                start = float(columns[3])
+                duration = float(columns[4])
+            except ValueError:
+                continue
+            end = start + duration
+            if end <= start:
+                continue
+            raw_speaker = columns[7]
+            speaker = speaker_labels.setdefault(raw_speaker, f"화자 {len(speaker_labels) + 1}")
             segments.append(SpeakerSegment(start=start, end=end, speaker=speaker))
         return segments
 
@@ -404,7 +528,7 @@ class AnalysisEngine:
     @staticmethod
     def _release_memory() -> None:
         gc.collect()
-        if torch.cuda.is_available():
+        if not IS_MACOS and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     @staticmethod

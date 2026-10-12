@@ -19,18 +19,17 @@ CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트�
 
 ## macOS
 
-프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`는 설치된 Python 3.11+Tkinter를 재사용합니다. 없으면 프로젝트 내부 `.tools`에 사전 빌드 Python 3.11을 내려받으므로 Homebrew가 Python·Tkinter를 소스에서 컴파일하지 않습니다. Homebrew는 FFmpeg 설치에만 사용하며, 사전 빌드 bottle을 우선 요청합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
+프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`는 설치된 Python 3.11+Tkinter를 재사용합니다. 없으면 프로젝트 내부 `.tools`에 사전 빌드 Python 3.11을 내려받으므로 Homebrew가 Python·Tkinter를 소스에서 컴파일하지 않습니다. 같은 위치에 Nemotron 화자 분리용 공식 네이티브 실행기도 설치합니다. Homebrew는 FFmpeg 설치에만 사용하며, 사전 빌드 bottle을 우선 요청합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
 
 ```bash
 bash scripts/macos/Install-Dependencies.sh
 bash scripts/macos/Download-Models.sh
-bash scripts/macos/Prepare-FasterWhisper.sh
 bash scripts/macos/Run-Gui.sh
 ```
 
-macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용할 수 있습니다. 최고 정확도(Large-v3)는 CUDA GPU가 필요해 macOS에서는 실행할 수 없습니다.
+macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용할 수 있습니다. `Download-Models.sh`는 CTranslate2 형식으로 준비된 모델을 직접 받아 Intel Mac에서 로컬 INT8 변환 중 발생할 수 있는 충돌을 피하고, Nemotron의 공식 GGUF 화자 분리 모델도 함께 받습니다. 기존 원본 Whisper 파일만 이미 받아 둔 경우에는 `Prepare-FasterWhisper.sh`를 실행하면 같은 준비된 모델을 내려받습니다. 최고 정확도(Large-v3)는 CUDA GPU가 필요해 macOS에서는 실행할 수 없습니다.
 
-Intel Mac과 Apple Silicon Mac 모두 PyTorch 2.2.2 CPU 실행 환경을 사용합니다. 최신 PyTorch는 Intel용 macOS 휠을 더 이상 제공하지 않아, 두 아키텍처에서 공통으로 동작하는 검증된 버전으로 고정했습니다.
+화자 분리는 Python PyTorch 경로가 아니라 공식 NeMo-Speech.cpp 실행기를 씁니다. Intel Mac에서는 CPU, Apple Silicon에서는 Metal을 자동 선택하며 실행기는 프로젝트 내부 `.tools/nemo-speech`에만 설치됩니다.
 
 ## Linux
 

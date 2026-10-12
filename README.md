@@ -4,7 +4,7 @@
 
 > **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
-> **Intel Mac:** 설치 스크립트는 Intel·Apple Silicon 모두에서 사용할 수 있는 PyTorch 2.2.2를 설치합니다. macOS에서는 CPU 전사만 사용하므로 Apple GPU나 CUDA 설정은 필요하지 않습니다.
+> **macOS 화자 분리:** macOS는 Nemotron의 공식 GGUF 모델과 프로젝트 내부의 네이티브 실행기를 사용합니다. Intel Mac은 CPU로, Apple Silicon은 Metal로 화자 분리를 실행하므로 PyTorch·Transformers의 macOS 호환성에 영향을 받지 않습니다.
 
 ## 현재 가능한 기능
 
@@ -47,16 +47,15 @@
 
 ## macOS에서 실행하기
 
-처음 한 번만 필요한 준비입니다. Python 3.11, Tkinter, FFmpeg가 필요합니다. 설치 스크립트는 이미 설치된 Python 3.11+Tkinter를 우선 재사용하고, 없으면 프로젝트의 `.tools` 폴더에 사전 빌드 Python 3.11을 내려받아 만듭니다. Python과 Tkinter 때문에 Homebrew가 소스 컴파일을 시작하지 않습니다. FFmpeg 설치에만 Homebrew가 필요하므로, 없다면 [먼저 설치](https://brew.sh)해 주세요.
+처음 한 번만 필요한 준비입니다. Python 3.11, Tkinter, FFmpeg가 필요합니다. 설치 스크립트는 이미 설치된 Python 3.11+Tkinter를 우선 재사용하고, 없으면 프로젝트의 `.tools` 폴더에 사전 빌드 Python 3.11을 내려받아 만듭니다. 또한 화자 분리에 쓸 공식 네이티브 실행기를 같은 `.tools` 폴더에 설치합니다. Python과 Tkinter 때문에 Homebrew가 소스 컴파일을 시작하지 않습니다. FFmpeg 설치에만 Homebrew가 필요하므로, 없다면 [먼저 설치](https://brew.sh)해 주세요.
 
 터미널에서 프로젝트 최상위 폴더를 연 뒤 아래 순서대로 실행합니다.
 
 1. `bash scripts/macos/Install-Dependencies.sh`
-2. `bash scripts/macos/Download-Models.sh`
-3. `bash scripts/macos/Prepare-FasterWhisper.sh`
-4. 이후에는 `bash scripts/macos/Run-Gui.sh`
+2. `bash scripts/macos/Download-Models.sh` — macOS에서 바로 실행할 수 있는 Whisper 형식과 Nemotron GGUF 화자 분리 모델을 받습니다.
+3. 이후에는 `bash scripts/macos/Run-Gui.sh`
 
-모델은 Windows와 마찬가지로 프로젝트의 `models` 폴더에만 저장됩니다. macOS용 모델 준비와 실행은 CPU `int8` 설정을 사용합니다.
+모델은 프로젝트의 `models` 폴더에만 저장됩니다. macOS는 Intel Mac에서 발생할 수 있는 로컬 INT8 변환 오류를 피하기 위해, CTranslate2 형식으로 이미 준비된 Whisper 모델을 직접 받습니다. 전사는 CPU `int8` 설정을 사용합니다. 화자 분리는 Nemotron GGUF를 공식 네이티브 실행기로 처리하며, Intel Mac에서도 실제 화자 구간을 분리합니다.
 
 ## Linux에서 실행하기
 

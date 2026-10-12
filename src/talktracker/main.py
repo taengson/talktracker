@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import tkinter as tk
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import time
+import tkinter as tk
 from queue import Empty, Queue
 from threading import Event, Thread
 from pathlib import Path
@@ -41,6 +42,8 @@ PREPARE_WHISPER_SCRIPT = SETUP_SCRIPT_DIRECTORY / (
 )
 INSTALL_SCRIPT = SETUP_SCRIPT_DIRECTORY / ("Install-Dependencies.ps1" if IS_WINDOWS else "Install-Dependencies.sh")
 HUGGING_FACE_CLI = PROJECT_ROOT / ".venv" / ("Scripts/hf.exe" if IS_WINDOWS else "bin/hf")
+NEMO_SPEECH_CLI = PROJECT_ROOT / ".tools" / "nemo-speech" / "bin" / "nemo-speech"
+MACOS_NEMOTRON_GGUF = "Nemotron-3-Diarization.q8_0.gguf"
 SUPPORTED_FILE_TYPES = [
     ("지원되는 음성 파일", "*.m4a *.mp3 *.wav *.flac *.aac *.ogg"),
     ("모든 파일", "*.*"),
@@ -79,7 +82,14 @@ class TalkTrackerApp(tk.Tk):
         self.analysis_events: Queue[tuple[str, Any]] = Queue()
         self.cancel_event = Event()
         self.missing_models: list[str] = []
+        self.nemotron_runtime_missing = False
         self.model_setup_in_progress = False
+        self.model_setup_events: Queue[tuple[str, Any]] = Queue()
+        self.model_setup_process: subprocess.Popen[str] | None = None
+        self.model_setup_progress_dialog: tk.Toplevel | None = None
+        self.model_setup_stage = tk.StringVar()
+        self.model_setup_log: tk.Text | None = None
+        self.model_setup_progress: ttk.Progressbar | None = None
         self.whisper_profile_key = tk.StringVar(value="turbo")
         self._profile_by_label = {profile.label: profile for profile in WHISPER_PROFILES}
         self.whisper_profile_label = tk.StringVar(value=get_whisper_profile("turbo").label)
@@ -144,8 +154,12 @@ class TalkTrackerApp(tk.Tk):
         primary: bool = False,
         width: int | None = None,
     ) -> tk.Button:
-        background = self.TEAL if primary else self.PAPER
-        foreground = self.PAPER if primary else self.NAVY
+        # Native Aqua buttons ignore a custom background but retain the custom
+        # foreground.  A white primary label consequently becomes invisible on
+        # macOS, so use a dark label with a light teal fill there.
+        macos_primary = IS_MACOS and primary
+        background = "#DDF1EC" if macos_primary else self.TEAL if primary else self.PAPER
+        foreground = self.TEAL_DARK if macos_primary else self.PAPER if primary else self.NAVY
         border = self.TEAL if primary else "#C9DAD7"
         return tk.Button(
             parent,
@@ -153,9 +167,9 @@ class TalkTrackerApp(tk.Tk):
             command=command,
             bg=background,
             fg=foreground,
-            activebackground=self.TEAL_DARK if primary else "#EDF5F3",
-            activeforeground=self.PAPER if primary else self.NAVY,
-            disabledforeground="#8BA09C",
+            activebackground="#CBE7E0" if macos_primary else self.TEAL_DARK if primary else "#EDF5F3",
+            activeforeground=self.NAVY if macos_primary else self.PAPER if primary else self.NAVY,
+            disabledforeground="#526D68",
             font=("Segoe UI", 10, "bold"),
             relief="flat",
             bd=0,
@@ -266,8 +280,17 @@ class TalkTrackerApp(tk.Tk):
         runtime_folder = runtime.folder if runtime else profile.cuda_runtime_folder
         return {
             self._whisper_model_label(): (PROJECT_ROOT / "models" / runtime_folder, "model.bin"),
-            "Nemotron 화자 분리": (PROJECT_ROOT / "models" / "nemotron-3-diarization", "model.safetensors"),
+            "Nemotron 화자 분리": (
+                PROJECT_ROOT / "models" / "nemotron-3-diarization",
+                MACOS_NEMOTRON_GGUF if IS_MACOS else "model.safetensors",
+            ),
         }
+
+    @staticmethod
+    def _macos_nemotron_runtime_available() -> bool:
+        """The macOS installer keeps the native runtime inside this project."""
+
+        return bool(IS_MACOS and (NEMO_SPEECH_CLI.is_file() or shutil.which("nemo-speech")))
 
     @staticmethod
     def _gpu_available() -> bool:
@@ -280,9 +303,11 @@ class TalkTrackerApp(tk.Tk):
             for label, (location, weight_file) in self._model_locations().items()
             if not (location / weight_file).is_file()
         ]
-        if self.missing_models:
+        self.nemotron_runtime_missing = IS_MACOS and not self._macos_nemotron_runtime_available()
+        connection_count = len(self.missing_models) + int(self.nemotron_runtime_missing)
+        if connection_count:
             self.model_status_button.configure(
-                text=f"●  모델 연결 필요 ({len(self.missing_models)})",
+                text=f"●  모델 연결 필요 ({connection_count})",
                 bg="#FFF1E4",
                 fg="#99601C",
                 activebackground="#FFE5CA",
@@ -319,13 +344,23 @@ class TalkTrackerApp(tk.Tk):
 
         state_card = self._card(dialog, padx=16, pady=11)
         state_card.pack(fill="x", padx=24, pady=(0, 13))
+        source_model_ready = (PROJECT_ROOT / "models" / self.selected_whisper_profile.source_folder / "model.safetensors").is_file()
+        whisper_label = self._whisper_model_label()
         for label, (location, weight_file) in self._model_locations().items():
-            ready = label not in self.missing_models
+            nemotron_runtime_needed = label == "Nemotron 화자 분리" and self.nemotron_runtime_missing
+            ready = label not in self.missing_models and not nemotron_runtime_needed
             row = tk.Frame(state_card, bg=self.PAPER)
             row.pack(fill="x", pady=5)
             symbol = "●" if ready else "!"
             color = self.SUCCESS if ready else "#A8631A"
-            description = "준비됨" if ready else "다운로드 필요"
+            if ready:
+                description = "준비됨"
+            elif nemotron_runtime_needed:
+                description = "실행기 설치 필요"
+            elif label == whisper_label and source_model_ready:
+                description = "실행용 변환 필요"
+            else:
+                description = "다운로드 필요"
             tk.Label(row, text=symbol, bg=self.PAPER, fg=color, font=("Segoe UI", 10, "bold"), width=2).pack(side="left")
             tk.Label(row, text=label, bg=self.PAPER, fg=self.NAVY, font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left")
             tk.Label(row, text=description, bg=self.PAPER, fg=color, font=("Segoe UI", 9, "bold"), anchor="e").pack(side="right")
@@ -344,14 +379,14 @@ class TalkTrackerApp(tk.Tk):
         actions.pack(fill="x", padx=24, pady=(18, 24))
         self._button(actions, "상태 새로고침", lambda: self._reload_model_manager(dialog), width=12).pack(side="left")
 
-        if self.missing_models:
+        if self.missing_models or self.nemotron_runtime_missing:
             profile = self.selected_whisper_profile
             cuda_status = get_cuda_runtime_status()
             source_model_dir = PROJECT_ROOT / "models" / profile.source_folder
             source_models_missing = not (source_model_dir / "model.safetensors").is_file()
             nemotron_missing = "Nemotron 화자 분리" in self.missing_models
             whisper_runtime_missing = self._whisper_model_label() in self.missing_models
-            if not HUGGING_FACE_CLI.is_file():
+            if not HUGGING_FACE_CLI.is_file() or self.nemotron_runtime_missing:
                 self._button(
                     actions,
                     "패키지 준비 시작",
@@ -385,27 +420,35 @@ class TalkTrackerApp(tk.Tk):
             self._button(actions, "닫기", dialog.destroy, width=8).pack(side="right")
 
     def _reload_model_manager(self, dialog: tk.Toplevel) -> None:
-        self.model_setup_in_progress = False
+        if self.model_setup_in_progress:
+            messagebox.showinfo(
+                WINDOW_TITLE,
+                "모델 준비가 진행 중입니다.\n진행 창에서 완료 또는 실패 상태를 확인해 주세요.",
+            )
+            return
         dialog.destroy()
         self.refresh_model_status()
         self.open_model_manager()
 
-    def _start_setup_script(self, script: Path, description: str, arguments: list[str] | None = None) -> bool:
+    def _start_setup_script(
+        self,
+        script: Path,
+        description: str,
+        arguments: list[str] | None = None,
+        manager_dialog: tk.Toplevel | None = None,
+    ) -> bool:
         if self.model_setup_in_progress:
             messagebox.showinfo(WINDOW_TITLE, "모델 준비 작업이 이미 실행 중입니다.\n완료된 뒤 ‘상태 새로고침’을 눌러 주세요.")
             return False
         if not script.is_file():
             messagebox.showerror(WINDOW_TITLE, f"실행 스크립트를 찾지 못했습니다.\n\n{script}")
             return False
+        if IS_MACOS:
+            return self._start_macos_setup_script(script, description, arguments, manager_dialog)
         if IS_WINDOWS:
             command = ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", str(script)]
             if arguments:
                 command.extend(arguments)
-        elif IS_MACOS:
-            shell_command = " ".join(shlex.quote(part) for part in ["bash", str(script), *(arguments or [])])
-            terminal_command = f"cd {shlex.quote(str(PROJECT_ROOT))}; {shell_command}"
-            applescript_command = terminal_command.replace("\\", "\\\\").replace('"', '\\"')
-            command = ["osascript", "-e", f'tell application "Terminal" to do script "{applescript_command}"']
         elif IS_LINUX:
             shell_command = " ".join(shlex.quote(part) for part in ["bash", str(script), *(arguments or [])])
             terminal_command = (
@@ -446,6 +489,220 @@ class TalkTrackerApp(tk.Tk):
         )
         return True
 
+    def _start_macos_setup_script(
+        self,
+        script: Path,
+        description: str,
+        arguments: list[str] | None,
+        manager_dialog: tk.Toplevel | None,
+    ) -> bool:
+        """Run macOS setup in the app so users can follow its progress."""
+
+        command = ["bash", str(script), *(arguments or [])]
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=PROJECT_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except OSError as error:
+            messagebox.showerror(WINDOW_TITLE, f"스크립트를 시작하지 못했습니다.\n\n{error}")
+            return False
+
+        self.model_setup_in_progress = True
+        self.model_setup_process = process
+        self._show_model_setup_progress(description)
+        Thread(
+            target=self._read_model_setup_output,
+            args=(process, manager_dialog),
+            daemon=True,
+        ).start()
+        self.after(80, self._poll_model_setup_events)
+        return True
+
+    def _show_model_setup_progress(self, description: str) -> None:
+        dialog = self.model_setup_progress_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.deiconify()
+            dialog.lift()
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("모델 준비 진행")
+        dialog.resizable(False, False)
+        dialog.configure(bg=self.GROUND)
+        dialog.transient(self)
+        self._center_dialog_over_app(dialog, 610, 470)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+        self.model_setup_progress_dialog = dialog
+
+        header = tk.Frame(dialog, bg=self.GROUND)
+        header.pack(fill="x", padx=24, pady=(22, 8))
+        tk.Label(header, text="모델 준비 중", bg=self.GROUND, fg=self.NAVY, font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        tk.Label(
+            header,
+            text=f"{description} 작업을 이 창에서 계속 확인할 수 있습니다.",
+            bg=self.GROUND,
+            fg=self.MUTED,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(5, 0))
+
+        status_card = self._card(dialog, padx=14, pady=12)
+        status_card.pack(fill="x", padx=24, pady=(5, 10))
+        self.model_setup_stage.set("작업을 시작하고 있습니다…")
+        tk.Label(
+            status_card,
+            textvariable=self.model_setup_stage,
+            bg=self.PAPER,
+            fg=self.TEAL_DARK,
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=530,
+        ).pack(fill="x")
+        tk.Label(
+            status_card,
+            text="모델 크기와 인터넷 속도에 따라 몇 분 걸릴 수 있습니다.",
+            bg=self.PAPER,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        self.model_setup_progress = ttk.Progressbar(
+            dialog,
+            mode="indeterminate",
+            style="Talk.Horizontal.TProgressbar",
+        )
+        self.model_setup_progress.pack(fill="x", padx=24, pady=(0, 10))
+        self.model_setup_progress.start(12)
+
+        log_frame = tk.Frame(dialog, bg=self.GROUND)
+        log_frame.pack(fill="both", expand=True, padx=24)
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical")
+        log = tk.Text(
+            log_frame,
+            height=12,
+            bg="#10242B",
+            fg="#D8EEE8",
+            insertbackground="#D8EEE8",
+            font=("Menlo", 9),
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            yscrollcommand=scrollbar.set,
+            state="disabled",
+        )
+        scrollbar.configure(command=log.yview)
+        log.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.model_setup_log = log
+
+        footer = tk.Frame(dialog, bg=self.GROUND)
+        footer.pack(fill="x", padx=24, pady=(12, 20))
+        tk.Label(
+            footer,
+            text="창을 닫아도 준비 작업은 계속됩니다.",
+            bg=self.GROUND,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+        self._button(footer, "백그라운드로 계속", dialog.withdraw, width=15).pack(side="right")
+
+    @staticmethod
+    def _clean_setup_output(line: str) -> str:
+        """Keep streamed shell output readable in a Tk text widget."""
+
+        return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).replace("\r", "").strip()
+
+    @staticmethod
+    def _setup_stage_from_output(line: str) -> str | None:
+        lowered = line.lower()
+        if any(word in lowered for word in ("downloading", "fetching", "download")):
+            return "모델 파일을 내려받고 있습니다…"
+        if any(word in lowered for word in ("preparing", "converting", "converter")):
+            return "Whisper를 이 PC에서 실행할 형식으로 변환하고 있습니다…"
+        if "already ready" in lowered:
+            return "필요한 모델이 이미 준비되어 있는지 확인하고 있습니다…"
+        if lowered.startswith("done.") or "setup finished" in lowered:
+            return "마무리 확인을 하고 있습니다…"
+        return None
+
+    def _read_model_setup_output(self, process: subprocess.Popen[str], manager_dialog: tk.Toplevel | None) -> None:
+        if process.stdout is not None:
+            for output_line in process.stdout:
+                self.model_setup_events.put(("output", output_line))
+        self.model_setup_events.put(("finished", (process.wait(), manager_dialog)))
+
+    def _append_model_setup_log(self, line: str) -> None:
+        log = self.model_setup_log
+        if log is None or not log.winfo_exists():
+            return
+        log.configure(state="normal")
+        log.insert("end", f"{line}\n")
+        # Retain enough context for troubleshooting without growing forever.
+        if int(log.index("end-1c").split(".")[0]) > 450:
+            log.delete("1.0", "150.0")
+        log.see("end")
+        log.configure(state="disabled")
+
+    def _poll_model_setup_events(self) -> None:
+        while True:
+            try:
+                event, payload = self.model_setup_events.get_nowait()
+            except Empty:
+                break
+            if event == "output":
+                line = self._clean_setup_output(payload)
+                if line:
+                    self._append_model_setup_log(line)
+                    stage = self._setup_stage_from_output(line)
+                    if stage:
+                        self.model_setup_stage.set(stage)
+            elif event == "finished":
+                return_code, manager_dialog = payload
+                self._finish_model_setup(return_code, manager_dialog)
+                return
+        if self.model_setup_in_progress:
+            self.after(80, self._poll_model_setup_events)
+
+    def _finish_model_setup(self, return_code: int, manager_dialog: tk.Toplevel | None) -> None:
+        self.model_setup_in_progress = False
+        self.model_setup_process = None
+        self.refresh_model_status()
+        ready = not self.missing_models and not self.nemotron_runtime_missing
+
+        if self.model_setup_progress is not None and self.model_setup_progress.winfo_exists():
+            self.model_setup_progress.stop()
+        dialog = self.model_setup_progress_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.deiconify()
+            dialog.lift()
+
+        if return_code == 0 and ready:
+            self.model_setup_stage.set("모델 준비가 완료되었습니다. 이제 분석을 시작할 수 있습니다.")
+            self._append_model_setup_log("\n완료: 필요한 모델을 모두 확인했습니다.")
+        elif return_code == 0:
+            missing = ", ".join(self.missing_models)
+            if self.nemotron_runtime_missing:
+                missing = ", ".join(filter(None, (missing, "macOS 화자 분리 실행기")))
+            self.model_setup_stage.set(f"스크립트는 끝났지만 아직 필요한 모델이 있습니다: {missing}")
+            self._append_model_setup_log(f"\n확인 필요: {missing}")
+        else:
+            self.model_setup_stage.set("모델 준비를 완료하지 못했습니다. 아래 마지막 로그를 확인해 주세요.")
+            self._append_model_setup_log(f"\n실패: 준비 스크립트가 종료 코드 {return_code}로 끝났습니다.")
+
+        if manager_dialog is not None and manager_dialog.winfo_exists():
+            manager_dialog.destroy()
+            self.open_model_manager()
+
     @staticmethod
     def _linux_terminal_command(command: str) -> list[str] | None:
         """Return a command for a common Linux desktop terminal, if one is installed."""
@@ -465,7 +722,9 @@ class TalkTrackerApp(tk.Tk):
 
     def start_model_download(self, dialog: tk.Toplevel) -> None:
         profile = self.selected_whisper_profile
-        nemotron_weights = PROJECT_ROOT / "models" / "nemotron-3-diarization" / "model.safetensors"
+        nemotron_weights = PROJECT_ROOT / "models" / "nemotron-3-diarization" / (
+            MACOS_NEMOTRON_GGUF if IS_MACOS else "model.safetensors"
+        )
         download_message = f"{profile.label} 모델을 다운로드한 뒤, TalkTracker 실행용으로 준비합니다."
         if not nemotron_weights.is_file():
             download_message += "\nNemotron 화자 분리 모델도 함께 다운로드합니다."
@@ -481,20 +740,32 @@ class TalkTrackerApp(tk.Tk):
         ]
         if nemotron_weights.is_file():
             arguments.append("-SkipDiarization" if IS_WINDOWS else "--skip-diarization")
-        self._start_setup_script(DOWNLOAD_SCRIPT, "모델 다운로드 및 준비", arguments)
+        self._start_setup_script(
+            DOWNLOAD_SCRIPT,
+            "모델 다운로드 및 준비",
+            arguments,
+            manager_dialog=dialog,
+        )
 
     def start_package_install(self, dialog: tk.Toplevel) -> None:
-        self._start_setup_script(INSTALL_SCRIPT, "앱 패키지 준비")
+        self._start_setup_script(INSTALL_SCRIPT, "앱 패키지 준비", manager_dialog=dialog)
 
     def start_whisper_prepare(self, dialog: tk.Toplevel) -> None:
         profile = self.selected_whisper_profile
         if not messagebox.askyesno(
             WINDOW_TITLE,
-            f"{profile.label} 모델을 로컬 실행용 형식으로 준비합니다.\n추가 저장 공간이 필요하며, 몇 분 정도 걸릴 수 있습니다.\n\n계속할까요?",
+            f"이미 내려받은 {profile.label} 모델을 이 PC의 로컬 실행용 형식으로 변환합니다.\n"
+            "새 모델을 다시 다운로드하지는 않으며, 추가 저장 공간과 몇 분의 시간이 필요합니다.\n\n"
+            "다음 창에서 변환 진행 상황과 로그를 확인할 수 있습니다.\n\n계속할까요?",
         ):
             return
         arguments = ["-WhisperProfile", profile.key] if IS_WINDOWS else ["--whisper-profile", profile.key]
-        self._start_setup_script(PREPARE_WHISPER_SCRIPT, "선택 모델 준비", arguments)
+        self._start_setup_script(
+            PREPARE_WHISPER_SCRIPT,
+            "선택 모델 준비",
+            arguments,
+            manager_dialog=dialog,
+        )
 
     def _build_hero(self, parent: tk.Misc) -> None:
         hero = tk.Frame(parent, bg=self.NAVY, padx=32, pady=25)
@@ -604,7 +875,7 @@ class TalkTrackerApp(tk.Tk):
         self.refresh_model_status()
         if profile.requires_gpu and not self._gpu_available():
             self._set_status(f"최고 정확도 모델은 CUDA GPU가 필요합니다. {get_cuda_runtime_status().message}")
-        elif self.missing_models:
+        elif self.missing_models or self.nemotron_runtime_missing:
             self._set_status(f"{profile.short_label} 전사 모델을 준비한 뒤 분석할 수 있습니다.")
         else:
             self._set_status(f"{profile.short_label} 전사 모델을 사용할 준비가 됐습니다.")
@@ -709,7 +980,7 @@ class TalkTrackerApp(tk.Tk):
             )
             return
         self.refresh_model_status()
-        if self.missing_models:
+        if self.missing_models or self.nemotron_runtime_missing:
             messagebox.showwarning(WINDOW_TITLE, "로컬 모델을 준비한 뒤 분석할 수 있습니다.")
             self.open_model_manager()
             return

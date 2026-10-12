@@ -11,6 +11,8 @@ python="$venv_root/bin/python"
 tools_root="$project_root/.tools"
 uv_root="$tools_root/uv"
 uv="$uv_root/uv"
+nemo_speech_root="$tools_root/nemo-speech"
+nemo_speech="$nemo_speech_root/bin/nemo-speech"
 
 find_python311_with_tk() {
   local candidate version
@@ -73,14 +75,20 @@ verify_python_dependencies() {
 import importlib
 import sys
 
-for module_name in (
-    "torch",
-    "transformers",
+modules = [
+    "numpy",
     "huggingface_hub",
     "ctranslate2",
     "faster_whisper",
+]
+if sys.platform != "darwin":
+    modules.extend((
+    "torch",
+    "transformers",
     "librosa",
-):
+    ))
+
+for module_name in modules:
     try:
         importlib.import_module(module_name)
     except Exception as error:
@@ -111,14 +119,50 @@ EOF
   fi
 }
 
+install_nemo_speech() {
+  if [[ -x "$nemo_speech" ]]; then
+    return
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to download the macOS speaker-diarization runtime." >&2
+    exit 1
+  fi
+
+  local installer backend
+  backend="cpu"
+  if [[ "$(uname -m)" == "arm64" ]]; then
+    backend="metal"
+  fi
+  installer="$(mktemp -t talktracker-nemo-speech.XXXXXX)"
+  echo "Downloading the prebuilt macOS speaker-diarization runtime..."
+  if ! curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+    https://raw.githubusercontent.com/NVIDIA/NeMo-Speech.cpp/main/scripts/install.sh --output "$installer"; then
+    rm -f "$installer"
+    echo "Could not download the speaker-diarization runtime installer. Check the network connection and run this script again." >&2
+    exit 1
+  fi
+
+  # Prefer the verified native archive and fail clearly instead of unexpectedly
+  # starting a lengthy C++ source build on the user's Mac.
+  if ! sh "$installer" --prefix "$nemo_speech_root" --backend "$backend" --binary-only --no-modify-path; then
+    rm -f "$installer"
+    echo "Could not install the prebuilt macOS speaker-diarization runtime." >&2
+    echo "No source build was started. Check the message above, then run this script again." >&2
+    exit 1
+  fi
+  rm -f "$installer"
+  [[ -x "$nemo_speech" ]] || { echo "The speaker-diarization runtime was not installed where expected: $nemo_speech" >&2; exit 1; }
+  "$nemo_speech" --version
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This setup script is for macOS. Run the matching script for your operating system." >&2
   exit 1
 fi
 
 case "$(uname -m)" in
-  x86_64) echo "Detected an Intel Mac. Installing the compatible PyTorch runtime..." ;;
-  arm64) echo "Detected an Apple Silicon Mac. Installing the macOS CPU PyTorch runtime..." ;;
+  x86_64) echo "Detected an Intel Mac. Installing the native CPU speech runtime..." ;;
+  arm64) echo "Detected an Apple Silicon Mac. Installing the native Metal speech runtime..." ;;
   *) echo "Detected an unsupported macOS CPU architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -141,6 +185,7 @@ EOF
 fi
 
 install_ffmpeg_with_homebrew
+install_nemo_speech
 
 echo "Installing TalkTracker packages..."
 if [[ -x "$uv" ]]; then
