@@ -25,6 +25,20 @@ raise SystemExit(0 if ct.get_cuda_device_count() > 0 and "float16" in compute_ty
 PY
 }
 
+verify_conversion_dependencies() {
+  "$python" - <<'PY'
+import importlib
+import sys
+
+for module_name in ("torch", "transformers", "huggingface_hub"):
+    try:
+        importlib.import_module(module_name)
+    except Exception as error:
+        print(f"Could not import {module_name}: {error}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/linux/Prepare-FasterWhisper.sh [options]
@@ -96,6 +110,13 @@ if [[ ! -x "$converter" || ! -x "$python" ]]; then
 fi
 
 source "$script_dir/Configure-Cuda-Environment.sh"
+
+if ! conversion_check_output="$(verify_conversion_dependencies 2>&1)"; then
+  echo "Whisper model conversion requires a working PyTorch installation." >&2
+  echo "$conversion_check_output" >&2
+  echo "Run scripts/linux/Install-Dependencies.sh again, then retry model preparation." >&2
+  exit 1
+fi
 
 if probe_ctranslate2_cuda; then
   cuda_available=true

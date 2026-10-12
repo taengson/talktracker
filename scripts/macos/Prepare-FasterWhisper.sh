@@ -6,7 +6,22 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd "$script_dir/../.." && pwd)"
 converter="$project_root/.venv/bin/ct2-transformers-converter"
+python="$project_root/.venv/bin/python"
 whisper_profile="turbo"
+
+verify_conversion_dependencies() {
+  "$python" - <<'PY'
+import importlib
+import sys
+
+for module_name in ("torch", "transformers", "huggingface_hub"):
+    try:
+        importlib.import_module(module_name)
+    except Exception as error:
+        print(f"Could not import {module_name}: {error}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+}
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This setup script is for macOS. Run the matching script for your operating system." >&2
@@ -75,9 +90,16 @@ if [[ ! -f "$source/model.safetensors" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$converter" ]]; then
+if [[ ! -x "$converter" || ! -x "$python" ]]; then
   echo "CTranslate2 converter was not found: $converter" >&2
   echo "Run scripts/macos/Install-Dependencies.sh first." >&2
+  exit 1
+fi
+
+if ! conversion_check_output="$(verify_conversion_dependencies 2>&1)"; then
+  echo "Whisper model conversion requires a working PyTorch installation." >&2
+  echo "$conversion_check_output" >&2
+  echo "Run scripts/macos/Install-Dependencies.sh again, then retry model preparation." >&2
   exit 1
 fi
 

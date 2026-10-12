@@ -1,14 +1,14 @@
 # Local model runtime
-# The CPU index keeps Windows/Linux installations usable without a suitable NVIDIA GPU.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.1+cpu ; platform_system != "Darwin"
-torchaudio==2.11.0+cpu ; platform_system != "Darwin"
+# Whisper GPU execution is handled by CTranslate2. PyTorch is used for
+# diarization, and PyPI supplies the same compatible runtime on Linux x86/ARM.
+torch==2.14.1 ; platform_system != "Darwin"
 # PyTorch 2.2.2 is the latest release that still ships macOS Intel wheels.
 # It also runs on Apple Silicon and TalkTracker deliberately uses the CPU path
 # on macOS, so one compatible pair is more reliable than architecture-specific
 # latest releases.
 torch==2.2.2 ; platform_system == "Darwin"
-torchaudio==2.2.2 ; platform_system == "Darwin"
+# TalkTracker does not import torchaudio; omitting it avoids an unavailable
+# current Linux ARM64 wheel without changing the application runtime.
 numpy>=1.26,<3
 librosa>=0.10.2
 transformers

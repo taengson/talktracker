@@ -38,6 +38,29 @@ has_nvidia_gpu() {
   command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
 }
 
+verify_python_dependencies() {
+  "$python" - <<'PY'
+import importlib
+import sys
+
+for module_name in (
+    "torch",
+    "transformers",
+    "huggingface_hub",
+    "ctranslate2",
+    "faster_whisper",
+    "librosa",
+):
+    try:
+        importlib.import_module(module_name)
+    except Exception as error:
+        print(f"Could not import {module_name}: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+print("TalkTracker Python packages are ready.")
+PY
+}
+
 run_as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
@@ -143,6 +166,13 @@ echo "Installing TalkTracker packages..."
 "$python" -m pip install -r "$requirements"
 
 source "$script_dir/Configure-Cuda-Environment.sh"
+if ! dependency_check_output="$(verify_python_dependencies 2>&1)"; then
+  echo "TalkTracker package verification failed:" >&2
+  echo "$dependency_check_output" >&2
+  echo "Fix the reported package error, then run this script again." >&2
+  exit 1
+fi
+echo "$dependency_check_output"
 
 cuda_probe_output=""
 if cuda_probe_output="$(probe_ctranslate2_cuda 2>&1)"; then

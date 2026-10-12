@@ -45,6 +45,8 @@ bash scripts/linux/Run-Gui.sh
 
 CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
 
+Linux ARM64는 PyTorch의 일반 PyPI 휠을 사용합니다. TalkTracker가 사용하지 않는 `torchaudio`는 이 환경에서 설치하지 않으며, 설치·모델 변환 전에 PyTorch·Transformers·CTranslate2·librosa를 직접 import해 실패 원인을 바로 표시합니다.
+
 기존에 설치를 마친 뒤 업데이트했다면 `./scripts/linux/Install-Dependencies.sh`를 한 번 더 실행해 새 Python 패키지(`librosa` 등)를 반영하세요.
 
 실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.

@@ -68,6 +68,29 @@ create_managed_venv() {
     "$uv" venv --managed-python --python 3.11 "$venv_root"
 }
 
+verify_python_dependencies() {
+  "$python" - <<'PY'
+import importlib
+import sys
+
+for module_name in (
+    "torch",
+    "transformers",
+    "huggingface_hub",
+    "ctranslate2",
+    "faster_whisper",
+    "librosa",
+):
+    try:
+        importlib.import_module(module_name)
+    except Exception as error:
+        print(f"Could not import {module_name}: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+print("TalkTracker Python packages are ready.")
+PY
+}
+
 install_ffmpeg_with_homebrew() {
   if command -v ffmpeg >/dev/null 2>&1; then
     return
@@ -128,6 +151,14 @@ else
   "$python" -m pip install --upgrade pip
   "$python" -m pip install -r "$requirements"
 fi
+
+if ! dependency_check_output="$(verify_python_dependencies 2>&1)"; then
+  echo "TalkTracker package verification failed:" >&2
+  echo "$dependency_check_output" >&2
+  echo "Fix the reported package error, then run this script again." >&2
+  exit 1
+fi
+echo "$dependency_check_output"
 
 echo
 echo "Done. The project environment is ready."
