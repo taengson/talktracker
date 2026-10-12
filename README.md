@@ -15,7 +15,7 @@
 - 호환 CUDA GPU가 있을 때 Whisper Large-v3 최고 정확도 모드 선택
 - 화자별 타임라인을 전사 중에도 먼저 표시
 - 경과 시간과 진행 상태 표시
-- 분석 중단 시, 그 시점까지 완성된 화자 구간과 전사 결과 유지
+- 분석 중단 시, 실행 중인 네이티브 화자 분리 작업을 즉시 종료하고 그 시점까지 완성된 화자 구간과 전사 결과 유지
 - 읽기 쉬운 Markdown 형식으로 결과 저장
 
 ## 현재 작업 상태
@@ -57,6 +57,21 @@
 
 모델은 프로젝트의 `models` 폴더에만 저장됩니다. macOS는 Intel Mac에서 발생할 수 있는 로컬 INT8 변환 오류를 피하기 위해, CTranslate2 형식으로 이미 준비된 Whisper 모델을 직접 받습니다. 전사는 CPU `int8` 설정을 사용합니다. 화자 분리는 Nemotron GGUF를 공식 네이티브 실행기로 처리하며, Intel Mac에서도 실제 화자 구간을 분리합니다.
 
+> **Intel Mac 사용 전 안내:** Intel Mac에서는 Whisper 전사와 Nemotron 화자 분리가 모두 CPU로 실행됩니다. 특히 긴 녹음은 화자 분리 단계부터 시간이 많이 걸려 실사용 효율이 크게 떨어질 수 있습니다. **빠른 전사(Small)**를 선택하면 Whisper 전사 시간은 줄지만 화자 분리 시간은 줄지 않습니다. 긴 녹음의 실제 분석은 CUDA GPU를 사용할 수 있는 Linux 또는 Windows PC를 권장합니다.
+
+### 내 Mac 확인 방법
+
+터미널에서 아래 명령을 실행합니다.
+
+```bash
+system_profiler SPHardwareDataType | grep -E 'Chip|Processor Name|Total Number of Cores|Memory'
+```
+
+- `Processor Name: Intel ...`이 보이면 Intel Mac입니다. 위의 CPU 전용 안내가 적용됩니다.
+- `Chip: Apple M1`, `Chip: Apple M2`처럼 표시되면 Apple Silicon입니다. Nemotron 화자 분리기는 Metal을 자동 사용하지만, Whisper 전사는 현재 CPU 설정으로 동작합니다.
+
+`uname -m`도 보조 확인에 쓸 수 있습니다. 일반적으로 Intel Mac은 `x86_64`, Apple Silicon은 `arm64`를 표시하지만, Apple Silicon에서 Rosetta 터미널을 열면 `x86_64`가 표시될 수 있으므로 `system_profiler` 결과를 우선하세요.
+
 ## Linux에서 실행하기
 
 Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3.11, Tkinter, FFmpeg 설치를 안내하거나 시도합니다. 배포판에 따라 Python 3.11이나 FFmpeg 패키지가 별도 저장소에 있을 수 있으며, 이 경우 스크립트의 안내에 따라 해당 저장소를 먼저 설정해 주세요.
@@ -68,6 +83,8 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 3. 이후에는 `bash scripts/linux/Run-Gui.sh`
 
 Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. NVIDIA GPU가 감지되면 설치 스크립트가 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 환경에 설치해 GPU `float16` 실행을 준비합니다. Small·Turbo는 GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환되지만, Large-v3는 GPU 전용입니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
+
+> **한국어 전사 기본값:** TalkTracker는 한국어 녹음을 기본 대상으로 하므로 Whisper에 한국어를 명시합니다. 이는 일부 Linux CUDA 환경에서 Large-v3의 자동 언어 감지 중 발생하는 오류를 피합니다. 다른 한 언어의 녹음만 처리하려면 GUI를 실행하기 전에 `TALKTRACKER_LANGUAGE=en`처럼 [Whisper 언어 코드](https://github.com/openai/whisper/blob/main/whisper/tokenizer.py)를 지정할 수 있습니다. 자동 감지가 꼭 필요하면 `TALKTRACKER_LANGUAGE=`로 빈 값으로 설정할 수 있지만, Large-v3 CUDA에서는 권장하지 않습니다.
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 

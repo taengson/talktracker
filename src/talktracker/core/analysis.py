@@ -5,9 +5,11 @@ from __future__ import annotations
 import gc
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ from .models import WhisperProfile, WhisperRuntime, get_cpu_runtime, get_whisper
 
 
 SAMPLE_RATE = 16_000
+DEFAULT_TRANSCRIPTION_LANGUAGE = "ko"
 ProgressCallback = Callable[[int, str], None]
 DiarizationCallback = Callable[[list["SpeakerSegment"], float], None]
 CancelCallback = Callable[[], bool]
@@ -139,7 +142,7 @@ class AnalysisEngine:
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
 
             self._notify(progress, 15, "화자 구간을 분석하고 있습니다…")
-            speaker_segments = self._diarize(normalized, audio)
+            speaker_segments = self._diarize(normalized, audio, should_cancel)
             if on_diarization:
                 on_diarization(speaker_segments, duration)
             self._release_memory()
@@ -242,9 +245,14 @@ class AnalysisEngine:
             raise ProcessingError("음성 파일에 분석할 소리가 없습니다.")
         return audio, frame_count / SAMPLE_RATE
 
-    def _diarize(self, normalized_audio: Path, audio: np.ndarray) -> list[SpeakerSegment]:
+    def _diarize(
+        self,
+        normalized_audio: Path,
+        audio: np.ndarray,
+        should_cancel: CancelCallback | None = None,
+    ) -> list[SpeakerSegment]:
         if IS_NATIVE_DIARIZATION:
-            return self._diarize_with_nemo_speech(normalized_audio)
+            return self._diarize_with_nemo_speech(normalized_audio, should_cancel)
         return self._diarize_with_transformers(audio)
 
     def _diarize_with_transformers(self, audio: np.ndarray) -> list[SpeakerSegment]:
@@ -304,7 +312,11 @@ class AnalysisEngine:
                 return candidate
         return None
 
-    def _diarize_with_nemo_speech(self, normalized_audio: Path) -> list[SpeakerSegment]:
+    def _diarize_with_nemo_speech(
+        self,
+        normalized_audio: Path,
+        should_cancel: CancelCallback | None = None,
+    ) -> list[SpeakerSegment]:
         """Run the native GGUF Nemotron runtime and read its RTTM result."""
 
         executable = self._nemo_speech_binary()
@@ -336,24 +348,54 @@ class AnalysisEngine:
             str(rttm_output),
         ]
         try:
-            completed = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
+            # NeMo-Speech can take a while on an Intel Mac or a CPU-only Linux
+            # host.  A new process session lets a cancel request stop the CLI
+            # and any workers it launched instead of waiting for inference to
+            # reach a natural checkpoint.
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as output:
+                process = subprocess.Popen(
+                    command,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+                while process.poll() is None:
+                    if self._cancelled(should_cancel):
+                        self._terminate_process_group(process)
+                        return []
+                    time.sleep(0.1)
+                return_code = process.returncode
+                output.seek(0)
+                command_output = output.read()
         except OSError as error:
-            raise ProcessingError(f"macOS 화자 분리 실행기를 시작하지 못했습니다. {error}") from error
+            raise ProcessingError(f"네이티브 화자 분리 실행기를 시작하지 못했습니다. {error}") from error
 
-        if completed.returncode != 0 or not rttm_output.is_file():
-            details = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        if return_code != 0 or not rttm_output.is_file():
+            details = [line.strip() for line in command_output.splitlines() if line.strip()]
             last_line = details[-1] if details else "실행 결과를 받지 못했습니다."
             raise ProcessingError(f"Nemotron 화자 분리를 완료하지 못했습니다. {last_line}")
 
         return self._parse_rttm(rttm_output)
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+        """Stop a cancellable native worker without leaving child processes."""
+
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                return
+            process.wait()
 
     @staticmethod
     def _parse_rttm(rttm_file: Path) -> list[SpeakerSegment]:
@@ -414,13 +456,21 @@ class AnalysisEngine:
         normalized_audio: Path,
         should_cancel: CancelCallback | None,
     ) -> tuple[list[TranscriptChunk], bool]:
-        segments, _info = model.transcribe(
-            str(normalized_audio),
-            beam_size=5,
-            word_timestamps=True,
-            vad_filter=True,
-            condition_on_previous_text=False,
-        )
+        # Automatic language detection in the current CTranslate2 Large-v3
+        # runtime can fail with a JSON type error on some CUDA environments.
+        # TalkTracker is Korean-first, so use Korean by default and retain an
+        # environment override for another known recording language. An empty
+        # value deliberately restores upstream automatic detection.
+        language = os.environ.get("TALKTRACKER_LANGUAGE", DEFAULT_TRANSCRIPTION_LANGUAGE).strip() or None
+        options: dict[str, Any] = {
+            "beam_size": 5,
+            "word_timestamps": True,
+            "vad_filter": True,
+            "condition_on_previous_text": False,
+        }
+        if language:
+            options["language"] = language
+        segments, _info = model.transcribe(str(normalized_audio), **options)
         chunks: list[TranscriptChunk] = []
         for segment in segments:
             if self._cancelled(should_cancel):
