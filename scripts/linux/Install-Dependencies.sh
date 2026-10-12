@@ -8,6 +8,9 @@ project_root="$(cd "$script_dir/../.." && pwd)"
 requirements="$project_root/requirements.txt"
 venv_root="$project_root/.venv"
 python="$venv_root/bin/python"
+tools_root="$project_root/.tools"
+nemo_speech_root="$tools_root/nemo-speech"
+nemo_speech="$nemo_speech_root/bin/nemo-speech"
 
 probe_ctranslate2_cuda() {
   "$python" - <<'PY'
@@ -44,12 +47,10 @@ import importlib
 import sys
 
 for module_name in (
-    "torch",
-    "transformers",
+    "numpy",
     "huggingface_hub",
     "ctranslate2",
     "faster_whisper",
-    "librosa",
 ):
     try:
         importlib.import_module(module_name)
@@ -77,6 +78,7 @@ install_linux_package() {
   if command -v apt-get >/dev/null 2>&1; then
     case "$dependency" in
       python) run_as_root apt-get update; run_as_root apt-get install -y python3.11 python3.11-venv ;;
+      curl) run_as_root apt-get update; run_as_root apt-get install -y curl ;;
       tkinter)
         if apt-cache show python3.11-tk >/dev/null 2>&1; then
           run_as_root apt-get install -y python3.11-tk
@@ -89,12 +91,14 @@ install_linux_package() {
   elif command -v dnf >/dev/null 2>&1; then
     case "$dependency" in
       python) run_as_root dnf install -y python3.11 ;;
+      curl) run_as_root dnf install -y curl ;;
       tkinter) run_as_root dnf install -y python3-tkinter ;;
       ffmpeg) run_as_root dnf install -y ffmpeg ;;
     esac
   elif command -v pacman >/dev/null 2>&1; then
     case "$dependency" in
       python) run_as_root pacman -Sy --needed python ;;
+      curl) run_as_root pacman -Sy --needed curl ;;
       tkinter) run_as_root pacman -Sy --needed tk ;;
       ffmpeg) run_as_root pacman -Sy --needed ffmpeg ;;
     esac
@@ -105,6 +109,37 @@ Install Python 3.11 (with venv and Tkinter) and FFmpeg using your distribution's
 EOF
     exit 1
   fi
+}
+
+install_nemo_speech() {
+  if [[ -x "$nemo_speech" ]]; then
+    return
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    install_linux_package curl
+  fi
+
+  local installer
+  installer="$(mktemp -t talktracker-nemo-speech.XXXXXX)"
+  echo "Downloading the prebuilt Linux speaker-diarization runtime..."
+  if ! curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+    https://raw.githubusercontent.com/NVIDIA/NeMo-Speech.cpp/main/scripts/install.sh --output "$installer"; then
+    rm -f "$installer"
+    echo "Could not download the speaker-diarization runtime installer. Check the network connection and run this script again." >&2
+    exit 1
+  fi
+
+  # The official installer chooses CUDA when a usable NVIDIA driver is
+  # visible, otherwise CPU. --binary-only prevents an unexpected source build.
+  if ! sh "$installer" --prefix "$nemo_speech_root" --backend auto --binary-only --no-modify-path; then
+    rm -f "$installer"
+    echo "Could not install the prebuilt Linux speaker-diarization runtime." >&2
+    echo "No source build was started. Check the message above, then run this script again." >&2
+    exit 1
+  fi
+  rm -f "$installer"
+  [[ -x "$nemo_speech" ]] || { echo "The speaker-diarization runtime was not installed where expected: $nemo_speech" >&2; exit 1; }
+  "$nemo_speech" --version
 }
 
 find_python311() {
@@ -173,6 +208,8 @@ if ! dependency_check_output="$(verify_python_dependencies 2>&1)"; then
   exit 1
 fi
 echo "$dependency_check_output"
+
+install_nemo_speech
 
 cuda_probe_output=""
 if cuda_probe_output="$(probe_ctranslate2_cuda 2>&1)"; then

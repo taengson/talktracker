@@ -4,7 +4,7 @@
 
 > **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
-> **macOS 화자 분리:** macOS는 Nemotron의 공식 GGUF 모델과 프로젝트 내부의 네이티브 실행기를 사용합니다. Intel Mac은 CPU로, Apple Silicon은 Metal로 화자 분리를 실행하므로 PyTorch·Transformers의 macOS 호환성에 영향을 받지 않습니다.
+> **화자 분리:** macOS와 Linux는 Nemotron의 공식 GGUF 모델과 프로젝트 내부의 네이티브 실행기를 사용합니다. Intel Mac은 CPU로, Apple Silicon은 Metal로, Linux는 사용 가능한 CPU 또는 CUDA로 화자 분리를 실행하므로 PyTorch·Transformers의 호환성에 영향을 받지 않습니다.
 
 ## 현재 가능한 기능
 
@@ -64,11 +64,10 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 터미널에서 프로젝트 최상위 폴더를 연 뒤 아래 순서대로 실행합니다.
 
 1. `bash scripts/linux/Install-Dependencies.sh`
-2. `bash scripts/linux/Download-Models.sh`
-3. `bash scripts/linux/Prepare-FasterWhisper.sh`
-4. 이후에는 `bash scripts/linux/Run-Gui.sh`
+2. `bash scripts/linux/Download-Models.sh` — 바로 실행 가능한 Whisper 및 Nemotron 모델을 받습니다.
+3. 이후에는 `bash scripts/linux/Run-Gui.sh`
 
-CUDA GPU 실행이 가능한 Linux 환경에서는 Small·Turbo가 GPU `float16`으로 실행되고, GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환됩니다.
+Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. CUDA GPU 실행이 가능한 환경에서는 Small·Turbo가 GPU `float16`으로 실행되고, GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환됩니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 

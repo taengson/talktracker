@@ -263,7 +263,7 @@
           <table>
             <thead><tr><th>위험</th><th>대응</th></tr></thead>
             <tbody>
-              <tr class="risk-high"><td><span class="risk-tag">우선</span>운영체제별 Nemotron 의존성 호환 문제</td><td>단계 0에서 Windows·macOS·Linux 실제 환경을 검증한다. macOS는 공식 NeMo-Speech.cpp GGUF 실행기를 사용하고, Windows·Linux는 Python/Transformers 경로를 사용한다.</td></tr>
+              <tr class="risk-high"><td><span class="risk-tag">우선</span>운영체제별 Nemotron 의존성 호환 문제</td><td>단계 0에서 Windows·macOS·Linux 실제 환경을 검증한다. macOS·Linux는 공식 NeMo-Speech.cpp GGUF 실행기를 사용하고, Windows는 Python/Transformers 경로를 사용한다.</td></tr>
               <tr class="risk-medium"><td><span class="risk-tag">주의</span>GPU가 없거나 VRAM 부족</td><td>CPU 모드를 제공하고 Turbo를 기본으로 한다. 필요하면 <code>medium</code>을 대안으로 둔다.</td></tr>
               <tr class="risk-medium"><td><span class="risk-tag">주의</span>동시 발화·잡음</td><td>겹침을 보존하고, 결과 화면에서 화자 라벨과 문장을 수정할 수 있게 한다.</td></tr>
               <tr class="risk-low"><td><span class="risk-tag">관리</span>화자 번호가 파일마다 달라짐</td><td>파일별 익명 라벨을 기본으로 하고 사용자가 이름을 붙이게 한다.</td></tr>

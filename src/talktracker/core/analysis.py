@@ -16,13 +16,12 @@ from typing import Any
 
 import numpy as np
 
-# Nemotron's Python integration requires a recent PyTorch/Transformers pair
-# that has no compatible Intel macOS PyTorch wheel.  On macOS we use NVIDIA's
-# native NeMo-Speech.cpp runtime and its bundled GGUF model instead.  Keep the
-# Python integration for Windows and Linux, where the existing setup supports
-# it.
-IS_MACOS = sys.platform == "darwin"
-if not IS_MACOS:
+# Nemotron's Python integration requires a very recent PyTorch/Transformers
+# pair and has proven fragile across local platforms.  macOS and Linux use
+# NVIDIA's native NeMo-Speech.cpp runtime with the official GGUF checkpoint.
+# Windows retains the Python integration used by its existing scripts.
+IS_NATIVE_DIARIZATION = sys.platform == "darwin" or sys.platform.startswith("linux")
+if not IS_NATIVE_DIARIZATION:
     import torch
     from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
@@ -181,17 +180,17 @@ class AnalysisEngine:
                 (
                     "Nemotron",
                     self.nemotron_dir,
-                    "Nemotron-3-Diarization.q8_0.gguf" if IS_MACOS else "model.safetensors",
+                    "Nemotron-3-Diarization.q8_0.gguf" if IS_NATIVE_DIARIZATION else "model.safetensors",
                 ),
             )
             if not (directory / weight_file).is_file()
         ]
         if missing:
             raise ProcessingError(f"로컬 모델이 준비되지 않았습니다: {', '.join(missing)}")
-        if IS_MACOS and not self._nemo_speech_binary():
+        if IS_NATIVE_DIARIZATION and not self._nemo_speech_binary():
             raise ProcessingError(
-                "macOS 화자 분리 실행기가 준비되지 않았습니다. "
-                "scripts/macos/Install-Dependencies.sh를 다시 실행해 주세요."
+                "화자 분리 실행기가 준비되지 않았습니다. "
+                "현재 운영체제의 Install-Dependencies 스크립트를 다시 실행해 주세요."
             )
 
     def _normalise_audio(self, source: Path, destination: Path) -> None:
@@ -244,7 +243,7 @@ class AnalysisEngine:
         return audio, frame_count / SAMPLE_RATE
 
     def _diarize(self, normalized_audio: Path, audio: np.ndarray) -> list[SpeakerSegment]:
-        if IS_MACOS:
+        if IS_NATIVE_DIARIZATION:
             return self._diarize_with_nemo_speech(normalized_audio)
         return self._diarize_with_transformers(audio)
 
@@ -285,7 +284,7 @@ class AnalysisEngine:
         return segments
 
     def _nemo_speech_binary(self) -> Path | None:
-        """Find the project-local NeMo-Speech.cpp CLI on macOS.
+        """Find the project-local NeMo-Speech.cpp CLI on supported systems.
 
         The installer keeps this native dependency under `.tools` rather than
         modifying the user's shell profile.  An environment variable and PATH
@@ -312,8 +311,8 @@ class AnalysisEngine:
         model = self.nemotron_dir / "Nemotron-3-Diarization.q8_0.gguf"
         if not executable:
             raise ProcessingError(
-                "macOS 화자 분리 실행기를 찾지 못했습니다. "
-                "scripts/macos/Install-Dependencies.sh를 다시 실행해 주세요."
+                "화자 분리 실행기를 찾지 못했습니다. "
+                "현재 운영체제의 Install-Dependencies 스크립트를 다시 실행해 주세요."
             )
         if not model.is_file():
             raise ProcessingError(
@@ -528,7 +527,7 @@ class AnalysisEngine:
     @staticmethod
     def _release_memory() -> None:
         gc.collect()
-        if not IS_MACOS and torch.cuda.is_available():
+        if not IS_NATIVE_DIARIZATION and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     @staticmethod

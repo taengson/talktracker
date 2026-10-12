@@ -25,15 +25,14 @@ cat /etc/os-release
 ```bash
 bash scripts/linux/Install-Dependencies.sh
 bash scripts/linux/Download-Models.sh --whisper-profile small
-bash scripts/linux/Prepare-FasterWhisper.sh --whisper-profile small --runtime cpu
 bash scripts/linux/Run-Gui.sh
 ```
 
 기대 결과는 다음과 같습니다.
 
 - `.venv`가 생성되고 필요한 Python 패키지가 설치됩니다.
-- `models/whisper-small`, `models/nemotron-3-diarization`이 내려받아집니다.
-- `models/whisper-small-ct2/model.bin`이 생성됩니다.
+- `models/whisper-small-ct2/model.bin`과 `models/nemotron-3-diarization/Nemotron-3-Diarization.q8_0.gguf`가 내려받아집니다.
+- 프로젝트 내부 `.tools/nemo-speech`에 화자 분리 실행기가 준비됩니다.
 - GUI에서 **빠른 전사**를 선택하면 모델 상태가 준비됨으로 표시됩니다.
 - 짧은 음성 파일을 선택해 분석과 Markdown 저장까지 완료할 수 있습니다.
 
@@ -44,10 +43,10 @@ NVIDIA GPU가 있다면 드라이버 상태를 먼저 확인합니다.
 ```bash
 nvidia-smi
 bash scripts/linux/Install-Dependencies.sh
-bash scripts/linux/Prepare-FasterWhisper.sh --whisper-profile small --runtime auto
+bash scripts/linux/Download-Models.sh --whisper-profile small
 ```
 
-CUDA 실행 환경이 준비된 경우 준비 스크립트는 GPU `float16` 모델과 CPU `int8` 대체 모델을 모두 만듭니다. 최근 CTranslate2/faster-whisper 조합은 NVIDIA 드라이버와 CUDA 12.x 런타임, cuDNN 9가 필요합니다.
+CUDA 실행 환경이 준비된 경우 앱은 받은 CTranslate2 Whisper 모델을 GPU `float16`으로 실행합니다. GPU를 시작하거나 전사하는 중 실패하면 Small·Turbo는 같은 모델을 CPU `int8`으로 다시 실행합니다. 최근 CTranslate2/faster-whisper 조합은 NVIDIA 드라이버와 CUDA 12.x 런타임, cuDNN 9가 필요합니다.
 
 Linux ARM64 NVIDIA 시스템은 PyPI에서 CPU 전용 CTranslate2가 설치될 수 있습니다. 이때 업데이트된 `Install-Dependencies.sh`는 프로젝트 내부 `.tools/ctranslate2-cuda`에 CUDA용 CTranslate2를 한 번 빌드합니다. CUDA Toolkit의 `nvcc`와 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 없으면 설치를 멈추고 필요한 항목을 정확히 안내합니다. 빌드가 완료되면 다음 명령으로 상태를 확인합니다.
 
@@ -62,17 +61,11 @@ PY
 
 ```text
 models/whisper-small-ct2/model.bin
-models/whisper-small-ct2-cuda-fp16/model.bin
 ```
 
-앱은 GPU 모델을 우선 사용합니다. GPU 모델을 로드하거나 전사하는 중 실패하면 Small·Turbo 프로필은 CPU 대체 모델로 자동 전환합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 CPU 모델만 생성되며, 이는 정상 동작입니다.
+앱은 GPU를 우선 사용합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 같은 준비된 모델을 CPU로 실행하며, 이는 정상 동작입니다. 화자 분리는 `.tools/nemo-speech`의 공식 네이티브 실행기를 사용하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
 
-`--runtime cuda` 또는 `--runtime both`는 CUDA 실행 환경이 확인될 때만 사용할 수 있습니다. GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니다.
-
-```bash
-source scripts/linux/Configure-Cuda-Environment.sh
-.venv/bin/python -c 'import ctranslate2 as ct; print("CUDA devices:", ct.get_cuda_device_count()); print("CUDA compute types:", sorted(ct.get_supported_compute_types("cuda")))'
-```
+GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니다.
 
 ## 테스트 결과에 포함할 내용
 

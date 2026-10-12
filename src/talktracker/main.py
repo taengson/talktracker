@@ -33,6 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
+USES_NATIVE_NEMOTRON = IS_MACOS or IS_LINUX
 SETUP_PLATFORM_NAME = "Windows" if IS_WINDOWS else "macOS" if IS_MACOS else "Linux" if IS_LINUX else sys.platform
 SETUP_SCRIPT_PLATFORM = "windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux" if IS_LINUX else None
 SETUP_SCRIPT_DIRECTORY = PROJECT_ROOT / "scripts" / (SETUP_SCRIPT_PLATFORM or "unsupported")
@@ -282,15 +283,15 @@ class TalkTrackerApp(tk.Tk):
             self._whisper_model_label(): (PROJECT_ROOT / "models" / runtime_folder, "model.bin"),
             "Nemotron 화자 분리": (
                 PROJECT_ROOT / "models" / "nemotron-3-diarization",
-                MACOS_NEMOTRON_GGUF if IS_MACOS else "model.safetensors",
+                MACOS_NEMOTRON_GGUF if USES_NATIVE_NEMOTRON else "model.safetensors",
             ),
         }
 
     @staticmethod
-    def _macos_nemotron_runtime_available() -> bool:
-        """The macOS installer keeps the native runtime inside this project."""
+    def _native_nemotron_runtime_available() -> bool:
+        """The platform setup script keeps the native runtime in this project."""
 
-        return bool(IS_MACOS and (NEMO_SPEECH_CLI.is_file() or shutil.which("nemo-speech")))
+        return bool(USES_NATIVE_NEMOTRON and (NEMO_SPEECH_CLI.is_file() or shutil.which("nemo-speech")))
 
     @staticmethod
     def _gpu_available() -> bool:
@@ -303,7 +304,7 @@ class TalkTrackerApp(tk.Tk):
             for label, (location, weight_file) in self._model_locations().items()
             if not (location / weight_file).is_file()
         ]
-        self.nemotron_runtime_missing = IS_MACOS and not self._macos_nemotron_runtime_available()
+        self.nemotron_runtime_missing = USES_NATIVE_NEMOTRON and not self._native_nemotron_runtime_available()
         connection_count = len(self.missing_models) + int(self.nemotron_runtime_missing)
         if connection_count:
             self.model_status_button.configure(
@@ -692,7 +693,7 @@ class TalkTrackerApp(tk.Tk):
         elif return_code == 0:
             missing = ", ".join(self.missing_models)
             if self.nemotron_runtime_missing:
-                missing = ", ".join(filter(None, (missing, "macOS 화자 분리 실행기")))
+                missing = ", ".join(filter(None, (missing, "화자 분리 실행기")))
             self.model_setup_stage.set(f"스크립트는 끝났지만 아직 필요한 모델이 있습니다: {missing}")
             self._append_model_setup_log(f"\n확인 필요: {missing}")
         else:
@@ -723,7 +724,7 @@ class TalkTrackerApp(tk.Tk):
     def start_model_download(self, dialog: tk.Toplevel) -> None:
         profile = self.selected_whisper_profile
         nemotron_weights = PROJECT_ROOT / "models" / "nemotron-3-diarization" / (
-            MACOS_NEMOTRON_GGUF if IS_MACOS else "model.safetensors"
+            MACOS_NEMOTRON_GGUF if USES_NATIVE_NEMOTRON else "model.safetensors"
         )
         download_message = f"{profile.label} 모델을 다운로드한 뒤, TalkTracker 실행용으로 준비합니다."
         if not nemotron_weights.is_file():

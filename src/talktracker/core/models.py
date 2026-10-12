@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 
 
 @dataclass(frozen=True)
@@ -167,8 +168,14 @@ def get_whisper_runtime(profile: WhisperProfile, *, use_cuda: bool | None = None
     if use_cuda is None:
         use_cuda = cuda_available()
     if use_cuda:
+        # Linux downloads the upstream faster-whisper CTranslate2 checkpoint
+        # directly. The same model.bin supports CPU INT8 and CUDA FP16, so a
+        # second converted GPU folder is neither needed nor produced there.
+        folder = profile.cuda_runtime_folder
+        if sys.platform.startswith("linux") and profile.cpu_runtime_folder:
+            folder = profile.cpu_runtime_folder
         return WhisperRuntime(
-            folder=profile.cuda_runtime_folder,
+            folder=folder,
             device="cuda",
             compute_type="float16",
             label="CUDA GPU · FP16",

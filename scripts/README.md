@@ -38,15 +38,14 @@ macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용�
 ```bash
 bash scripts/linux/Install-Dependencies.sh
 bash scripts/linux/Download-Models.sh
-bash scripts/linux/Prepare-FasterWhisper.sh
 bash scripts/linux/Run-Gui.sh
 ```
 
-CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
+Linux는 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받아 로컬 PyTorch 변환을 하지 않습니다. 앱은 CUDA GPU가 준비되면 GPU `float16`으로 실행하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU `int8`으로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
 
-Linux ARM64는 PyTorch의 일반 PyPI 휠을 사용합니다. TalkTracker가 사용하지 않는 `torchaudio`는 이 환경에서 설치하지 않으며, 설치·모델 변환 전에 PyTorch·Transformers·CTranslate2·librosa를 직접 import해 실패 원인을 바로 표시합니다.
+화자 분리는 Nemotron GGUF와 공식 NeMo-Speech.cpp 실행기를 사용합니다. 설치 스크립트는 실행기를 프로젝트 내부 `.tools/nemo-speech`에 설치하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
 
-기존에 설치를 마친 뒤 업데이트했다면 `./scripts/linux/Install-Dependencies.sh`를 한 번 더 실행해 새 Python 패키지(`librosa` 등)를 반영하세요.
+기존에 설치를 마친 뒤 업데이트했다면 `bash scripts/linux/Install-Dependencies.sh`를 한 번 더 실행해 네이티브 화자 분리 실행기를 준비하세요.
 
 실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.
 
@@ -60,6 +59,6 @@ Linux ARM64는 PyTorch의 일반 PyPI 휠을 사용합니다. TalkTracker가 사
 | 권장 | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile turbo` | `bash scripts/macos/Download-Models.sh --whisper-profile turbo` | `bash scripts/linux/Download-Models.sh --whisper-profile turbo` |
 | 최고 정확도 (CUDA GPU 필요) | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile large-v3` | 다운로드는 가능하지만 macOS에서는 실행할 수 없음 | `bash scripts/linux/Download-Models.sh --whisper-profile large-v3` |
 
-파일 다운로드 후 실행 형식으로 바로 준비하려면 Windows에서는 `-PrepareForLocalUse`, macOS에서는 `--prepare-for-local-use`를 다운로드 명령 끝에 붙일 수 있습니다.
+macOS와 Linux는 다운로드한 모델이 곧바로 실행 가능한 CTranslate2 형식입니다. 기존 원본 Whisper 파일만 받아 둔 경우에는 각 운영체제의 `Prepare-FasterWhisper` 스크립트에 `--whisper-profile`을 지정해 준비된 모델만 받을 수 있습니다. Windows에서는 `-PrepareForLocalUse`를 다운로드 명령 끝에 붙여 변환까지 이어서 실행할 수 있습니다.
 
-Windows에서 모델 준비 대상을 직접 지정하려면 `Prepare-FasterWhisper.ps1`에 `-Runtime cpu`, `-Runtime cuda`, 또는 `-Runtime both`를 붙일 수 있습니다. Linux에서는 `Prepare-FasterWhisper.sh`에 `--runtime cpu`, `--runtime cuda`, 또는 `--runtime both`를 붙일 수 있습니다. 두 운영체제 모두 기본값 `auto`가 실제 CTranslate2 CUDA 실행 가능 여부를 확인해 적절한 모델을 준비합니다.
+Windows에서 모델 준비 대상을 직접 지정하려면 `Prepare-FasterWhisper.ps1`에 `-Runtime cpu`, `-Runtime cuda`, 또는 `-Runtime both`를 붙일 수 있습니다. Linux는 하나의 준비된 CTranslate2 모델을 CPU `int8`과 CUDA GPU `float16`에서 모두 사용하며, 앱이 실행 시 실제 CTranslate2 CUDA 가능 여부를 확인해 선택합니다.

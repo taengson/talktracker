@@ -153,7 +153,7 @@ TalkTracker는 로컬 음성 파일에서 **누가, 언제, 무엇을 말했는�
 
 | 위험 | 영향 | 대응 |
 | --- | --- | --- |
-| 운영체제별 Nemotron 의존성 호환 문제 | 설치 또는 실행 실패 | 단계 0에서 Windows·macOS·Linux 실제 환경 검증을 먼저 수행한다. macOS는 공식 NeMo-Speech.cpp GGUF 실행기를 사용하고, Windows·Linux는 Python/Transformers 경로를 사용한다. |
+| 운영체제별 Nemotron 의존성 호환 문제 | 설치 또는 실행 실패 | 단계 0에서 Windows·macOS·Linux 실제 환경 검증을 먼저 수행한다. macOS·Linux는 공식 NeMo-Speech.cpp GGUF 실행기를 사용하고, Windows는 Python/Transformers 경로를 사용한다. |
 | GPU가 없거나 VRAM이 부족함 | 긴 파일 처리 시간이 길어짐 | CPU 모드를 제공하고, 기본 모델을 Turbo로 유지하며, 필요하면 `medium`을 선택지로 둔다. |
 | 동시 발화·잡음 | 화자 배정 오류 | 겹침을 보존하고, 결과 화면에서 라벨과 문장을 편집할 수 있게 한다. |
 | 화자 번호가 파일마다 달라짐 | 이름 연속성 혼란 | 파일별 익명 라벨을 기본으로 하고 사용자가 이름을 붙이게 한다. |
