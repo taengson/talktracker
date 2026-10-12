@@ -9,7 +9,7 @@
 - Python/Tkinter 기반 Windows·macOS·Linux 데스크톱 화면
 - 음성 파일 선택, 분석 시작, 중단, 선택 취소 버튼
 - 로컬 모델 준비 상태 표시 및 모델 준비 메뉴
-- 분석 단계와 경과 시간 표시
+- 분석 단계와 경과 시간 표시, Whisper 전사 중 처리된 녹음 시각 표시
 - 화자 분리가 끝나면 전사가 진행 중이어도 화자 타임라인 먼저 표시
 - 분석 중단 시 이미 완성된 결과만 화면에 남김
 - Markdown 결과 저장
@@ -18,7 +18,7 @@
 
 1. FFmpeg로 입력 파일을 16 kHz 모노 WAV로 정리합니다.
 2. `nvidia/Nemotron-3-Diarization`으로 화자별 발화 구간을 분석합니다.
-3. 사용자가 고른 Whisper 모델을 CTranslate2 형식으로 변환한 뒤 전사합니다. Windows·Linux에서 CUDA GPU가 준비되면 Small·Turbo는 GPU `float16`을 우선 사용하고, 그렇지 않으면 CPU `int8`을 사용합니다. GPU 로드가 실패하면 Small·Turbo는 CPU로 자동 전환합니다. Large-v3는 CUDA GPU `float16` 전용입니다.
+3. 사용자가 고른 Whisper 모델을 CTranslate2 형식으로 실행합니다. Windows는 원본 모델을 로컬에서 변환하고, macOS·Linux는 준비된 CTranslate2 모델을 직접 받습니다. Windows·Linux에서 CUDA GPU가 준비되면 Small·Turbo는 GPU `float16`을 우선 사용하고, 그렇지 않으면 CPU `int8`을 사용합니다. GPU 로드가 실패하면 Small·Turbo는 CPU로 자동 전환합니다. Large-v3는 CUDA GPU `float16` 전용이며 Linux에서는 구간 단위 시간으로 화자를 연결합니다.
 4. 전사 구간과 화자 구간의 시간대를 겹쳐 화자별 대화 기록으로 만듭니다.
 
 ## 모델과 저장 위치
@@ -27,10 +27,12 @@
 
 | 용도 | 폴더 | 비고 |
 | --- | --- | --- |
-| 화자 분리 | `models/nemotron-3-diarization` | Nemotron 원본 모델 |
-| 원본 전사 모델 | `models/whisper-large-v3-turbo` | Hugging Face 형식 |
-| CPU 전사용 모델 | `models/whisper-large-v3-turbo-ct2` | faster-whisper/CTranslate2 `int8` 형식 |
-| CUDA GPU 전사용 모델 | `models/whisper-large-v3-turbo-ct2-cuda-fp16` | faster-whisper/CTranslate2 `float16` 형식 |
+| 화자 분리 | `models/nemotron-3-diarization` | macOS·Linux는 GGUF, Windows는 Python 모델 파일 |
+| macOS·Linux Whisper | `models/whisper-*-ct2` | 내려받은 CTranslate2 실행 모델 |
+| Windows Whisper 원본 | `models/whisper-*` | Hugging Face 형식 원본 모델 |
+| Windows CPU·CUDA 실행 모델 | `models/whisper-*-ct2*` | 원본을 CTranslate2로 변환한 모델 |
+
+macOS·Linux의 CTranslate2 Whisper 폴더는 `config.json`, `preprocessor_config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json`이 모두 있어야 합니다. 앱과 최신 모델 스크립트는 전체 파일을 검사하며, 일부 파일만 빠졌다면 누락분만 복구합니다.
 
 ## 전사 품질 선택
 
@@ -40,7 +42,13 @@
 | 권장 | `openai/whisper-large-v3-turbo` | CUDA GPU 우선 · CPU 대체 가능 · 기본값 |
 | 최고 정확도 | `openai/whisper-large-v3` | 호환 CUDA GPU 필요 |
 
-선택한 원본 전사 모델만 다운로드합니다. CUDA GPU가 준비된 Windows·Linux에서는 해당 모델의 GPU 실행본과 CPU 대체 실행본을 함께 변환합니다. 결과 Markdown에는 실제 사용한 전사 모델과 실행 환경을 기록합니다.
+선택한 전사 모델만 다운로드합니다. Windows에서는 CUDA GPU가 준비되면 GPU 실행본과 CPU 대체 실행본을 함께 변환합니다. Linux는 하나의 준비된 CTranslate2 모델을 GPU `float16` 또는 CPU `int8`로 실행합니다. 결과 Markdown에는 실제 사용한 전사 모델과 실행 환경을 기록합니다.
+
+## 전사 오류 진단
+
+- Large-v3가 GPU를 시작한 뒤 전사 중 실패하면, 앱은 이를 단순 CUDA 설치 실패로 표시하지 않습니다.
+- 오류 시 실행 환경, 모델 구성, CTranslate2·faster-whisper 버전, 원본 예외를 `outputs/diagnostics/whisper-large-v3-*.log`에 기록합니다.
+- `model.bin`만 있는 불완전한 모델 폴더는 분석 시작 전에 감지합니다. 모델 관리의 **모델 다운로드 시작** 또는 운영체제별 `Download-Models` 스크립트로 빠진 파일만 복구할 수 있습니다.
 
 ## Windows·macOS·Linux 준비 및 실행
 
@@ -61,7 +69,7 @@ macOS 설치 스크립트는 기존 Python 3.11+Tkinter를 재사용하고, 없�
 
 - 약 1시간 49분 길이의 M4A 녹음으로 실제 분석 흐름을 확인 중입니다.
 - 화자 분리는 완료되면 전사 전에 타임라인에 반영됩니다.
-- 전사는 CPU 환경에서 가장 오래 걸리는 단계입니다.
+- 전사는 CPU 환경에서 가장 오래 걸리는 단계입니다. 현재 UI는 전사 중 처리된 녹음 시각과 전체 길이를 함께 표시합니다.
 - 현재 CPU 전사 속도와 전체 소요 시간은 이 실제 녹음의 완료 시점에 기록할 예정입니다.
 
 ## 중단 동작
@@ -75,6 +83,7 @@ macOS 설치 스크립트는 기존 Python 3.11+Tkinter를 재사용하고, 없�
 
 - [Linux 검증 가이드](linux-test-guide.md)에 따른 Ubuntu·Debian·Fedora·Arch 계열의 설치 및 GUI 실행 확인
 - Linux CPU 전사와 NVIDIA CUDA GPU 전사의 실제 처리 시간·CPU/VRAM 사용량 기록
+- Linux Large-v3의 전체 녹음 처리와 `outputs/diagnostics` 오류 기록 경로 확인
 - 긴 M4A 파일 전체 처리 시간 측정
 - 화자 수와 화자 구간의 품질 확인
 - Whisper 전사문과 화자 매칭의 자연스러움 확인

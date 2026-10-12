@@ -31,10 +31,10 @@ bash scripts/linux/Run-Gui.sh
 기대 결과는 다음과 같습니다.
 
 - `.venv`가 생성되고 필요한 Python 패키지가 설치됩니다.
-- `models/whisper-small-ct2/model.bin`과 `models/nemotron-3-diarization/Nemotron-3-Diarization.q8_0.gguf`가 내려받아집니다.
+- `models/whisper-small-ct2/`에 `config.json`, `preprocessor_config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json`이 모두 내려받아지고, `models/nemotron-3-diarization/Nemotron-3-Diarization.q8_0.gguf`도 준비됩니다.
 - 프로젝트 내부 `.tools/nemo-speech`에 화자 분리 실행기가 준비됩니다.
 - GUI에서 **빠른 전사**를 선택하면 모델 상태가 준비됨으로 표시됩니다.
-- 짧은 음성 파일을 선택해 분석과 Markdown 저장까지 완료할 수 있습니다.
+- 짧은 음성 파일을 선택해 분석과 Markdown 저장까지 완료할 수 있습니다. Whisper 전사 단계에서는 `처리한 시각 / 전체 길이`가 갱신됩니다.
 
 ## NVIDIA CUDA GPU 검증
 
@@ -59,13 +59,27 @@ print("CUDA compute types:", sorted(ct.get_supported_compute_types("cuda")))
 PY
 ```
 
-```text
-models/whisper-small-ct2/model.bin
+앱은 GPU를 우선 사용합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 같은 준비된 모델을 CPU로 실행하며, 이는 정상 동작입니다. Large-v3는 CPU 대체가 없으므로 CUDA 환경을 먼저 준비해야 합니다. 다만 GPU가 정상 시작된 뒤 전사 중에 실패한 경우에는 설치 문제로 단정하지 말고 아래의 진단 로그를 먼저 확인합니다. 화자 분리는 `.tools/nemo-speech`의 공식 네이티브 실행기를 사용하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
+
+## 모델 파일 완전성 및 Large-v3 확인
+
+CTranslate2 Whisper는 `model.bin`만으로 실행할 수 없습니다. `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`도 같은 모델 폴더에 있어야 합니다. 앱의 모델 관리 화면과 최신 모델 스크립트는 이 다섯 파일을 모두 확인합니다.
+
+업데이트 전 내려받은 Large-v3 폴더에 일부 파일이 빠져 있다면, 아래 명령은 이미 있는 큰 가중치 파일은 유지하고 누락된 파일만 다시 받습니다.
+
+```bash
+bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarization
 ```
 
-앱은 GPU를 우선 사용합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 같은 준비된 모델을 CPU로 실행하며, 이는 정상 동작입니다. Large-v3는 CPU 대체가 없으므로 설치 스크립트가 CUDA 런타임 설치에 실패했다는 메시지가 나오면 먼저 그 스크립트를 다시 실행해야 합니다. 화자 분리는 `.tools/nemo-speech`의 공식 네이티브 실행기를 사용하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
+Large-v3 GPU 전사를 확인할 때는 GUI에서 **최고 정확도 · Whisper Large-v3**를 선택하고, 별도 터미널에서 `nvidia-smi`를 실행해 Python 프로세스와 GPU 메모리 사용량을 확인합니다. Large-v3는 일부 Linux CUDA 조합의 단어 단위 정렬 오류를 피하기 위해 전사 구간 시간으로 화자를 연결합니다. 대화 내용과 화자 분리 결과는 유지됩니다.
 
-GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니다.
+실행 중 전사 오류가 나면 앱이 아래 위치에 진단 로그를 남깁니다.
+
+```text
+outputs/diagnostics/whisper-large-v3-YYYYMMDD-HHMMSS.log
+```
+
+이 로그에는 선택 프로필, 실제 실행 환경, 모델 구성 파일 값의 형식, CTranslate2·faster-whisper 버전, 원본 예외와 Python traceback이 들어 있습니다. CUDA 설치 스크립트를 반복 실행하기 전에 이 로그로 모델 파일 누락과 전사 실행 오류를 구분합니다.
 
 ## 테스트 결과에 포함할 내용
 
@@ -74,6 +88,7 @@ GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니�
 - `cat /etc/os-release`와 `uname -a` 출력
 - CPU만 사용했는지, NVIDIA CUDA GPU를 사용했는지
 - 실패한 단계의 전체 출력
-- 생성된 `models/*-ct2*/model.bin` 경로
+- 생성된 `models/*-ct2*/` 폴더와 다섯 필수 파일의 존재 여부
 - 짧은 음성 파일의 분석·Markdown 저장 성공 여부
+- 실패 시 `outputs/diagnostics/whisper-*.log` 내용
 

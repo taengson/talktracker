@@ -61,3 +61,15 @@ TalkTracker의 핵심 조합인 Whisper Turbo와 Nemotron은 이 PC에서 CPU만
 - 한국어 전사 정확도
 - 실제 회의에서의 화자 전환·동시 발화 품질
 - CPU 실행 시 허용 가능한 대기 시간
+
+## 2026-10-12 플랫폼 후속 기록
+
+Windows CPU 검증과 별도로 macOS·Linux 실행 경로를 보강했다. 이 절의 내용은 기존 Windows 검증 결과를 대체하지 않고, 후속 플랫폼 작업의 확인 범위를 기록한다.
+
+- macOS·Linux는 원본 Whisper를 로컬에서 변환하지 않고, 실행 가능한 CTranslate2 모델을 직접 받는다.
+- Linux에서 Nemotron 네이티브 화자 분리와 Whisper Large-v3 Turbo GPU 전사 흐름을 실제 녹음 파일로 확인했다.
+- Linux CUDA 환경에서 Large-v3를 선택할 수 있으며, 이 프로필은 구간 단위 시간으로 화자를 연결한다.
+- CTranslate2 모델은 `model.bin` 외 네 개의 구성 파일도 필요하다. 앱과 모델 다운로드 스크립트는 다섯 파일 전체를 검사하고 누락 파일만 복구한다.
+- Large-v3 전사 오류가 발생하면 `outputs/diagnostics/`에 실행 환경과 원본 예외를 기록한다. 다음 검증 때는 이 로그와 `nvidia-smi`의 GPU 사용량을 함께 보관한다.
+
+남은 확인 항목은 Large-v3로 긴 녹음을 끝까지 처리했을 때의 처리 시간·VRAM 사용량·전사 품질이다. 이 값은 실제 GPU와 녹음 길이에 따라 달라지므로, 확인된 실행 환경과 함께 별도로 기록한다.

@@ -14,7 +14,7 @@
 - 호환 CUDA GPU를 감지하면 Small·Turbo도 GPU `float16`으로 자동 전사하고, 사용할 수 없으면 CPU `int8`으로 자동 전환
 - 호환 CUDA GPU가 있을 때 Whisper Large-v3 최고 정확도 모드 선택
 - 화자별 타임라인을 전사 중에도 먼저 표시
-- 경과 시간과 진행 상태 표시
+- 경과 시간과 진행 상태 표시, Whisper 전사 중에는 처리된 녹음 시각 표시
 - 분석 중단 시, 실행 중인 네이티브 화자 분리 작업을 즉시 종료하고 그 시점까지 완성된 화자 구간과 전사 결과 유지
 - 읽기 쉬운 Markdown 형식으로 결과 저장
 
@@ -26,7 +26,7 @@
 - Nemotron으로 화자별 구간을 먼저 찾고, 분석 도중에도 화자 타임라인을 표시
 - Whisper Small(빠른 확인), Large-v3 Turbo(권장), Large-v3(GPU 필요)를 선택해 전사
 - Windows와 Linux에서 CUDA GPU가 준비되면 GPU `float16`을 우선 사용하고, GPU 로드 실패 시 Small·Turbo는 CPU `int8`으로 자동 전환
-- 전사 중 경과 시간과 상태 문구를 표시해 긴 파일의 진행 여부를 확인
+- 전사 중 경과 시간과 상태 문구, 처리된 녹음 시각을 표시해 긴 파일의 진행 여부를 확인
 - 분석을 중단하면 이미 완료된 화자 분리와 전사 결과만으로 화면 및 저장 결과 구성
 - 모델 가중치는 프로젝트의 `models/`에 보관하며, Git에는 포함하지 않음
 
@@ -84,9 +84,17 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 
 Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. NVIDIA GPU가 감지되면 설치 스크립트가 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 환경에 설치해 GPU `float16` 실행을 준비합니다. Small·Turbo는 GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환되지만, Large-v3는 GPU 전용입니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
 
+Whisper 실행용 모델은 `model.bin` 하나만으로 준비가 끝난 것이 아닙니다. `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`도 필요합니다. 현재 앱과 Linux 스크립트는 다섯 파일을 모두 확인하고, 일부만 빠진 경우에는 모델 전체를 다시 받지 않고 누락된 파일만 복구합니다. 업데이트 뒤 모델 관리 화면에서 다운로드 필요 상태가 보이면 **모델 다운로드 시작**을 누르거나 아래 명령을 실행하세요.
+
+```bash
+bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarization
+```
+
 > **한국어 전사 기본값:** TalkTracker는 한국어 녹음을 기본 대상으로 하므로 Whisper에 한국어를 명시합니다. 이는 일부 Linux CUDA 환경에서 Large-v3의 자동 언어 감지 중 발생하는 오류를 피합니다. 다른 한 언어의 녹음만 처리하려면 GUI를 실행하기 전에 `TALKTRACKER_LANGUAGE=en`처럼 [Whisper 언어 코드](https://github.com/openai/whisper/blob/main/whisper/tokenizer.py)를 지정할 수 있습니다. 자동 감지가 꼭 필요하면 `TALKTRACKER_LANGUAGE=`로 빈 값으로 설정할 수 있지만, Large-v3 CUDA에서는 권장하지 않습니다.
 
-> **Large-v3 CUDA 호환 모드:** 일부 Linux CUDA 환경에서 Large-v3의 단어 단위 타임스탬프 정렬이 CTranslate2 오류로 끝날 수 있어, Large-v3는 전사 구간 단위 시간으로 화자를 연결합니다. 대화 내용과 화자 구분은 그대로 만들며, Small·Turbo는 단어 단위 시간을 계속 사용합니다.
+> **Large-v3 CUDA 호환 모드:** 일부 Linux CUDA 환경에서 Large-v3의 단어 단위 타임스탬프 정렬이 CTranslate2 오류로 끝날 수 있어, Large-v3는 전사 구간 단위 시간으로 화자를 연결합니다. 대화 내용과 화자 구분은 그대로 만들며, Small·Turbo는 단어 단위 시간을 계속 사용합니다. 전사 중에는 `처리한 시각 / 전체 길이`가 표시되므로 실제 진행 여부를 확인할 수 있습니다.
+
+> **Large-v3 오류 확인:** 누락된 모델 파일은 분석 전에 바로 안내됩니다. CUDA GPU가 이미 시작된 뒤 발생한 전사 오류는 설치 오류로 단정하지 않으며, 앱은 실행 환경, 모델 구성, CTranslate2·faster-whisper 버전, 원본 예외를 `outputs/diagnostics/whisper-large-v3-*.log`에 기록합니다.
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 
@@ -95,9 +103,9 @@ Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper
 1. 음성 파일을 분석용 형식으로 정리합니다.
 2. Nemotron이 화자별 발화 구간을 찾습니다.
 3. Whisper가 음성을 글로 옮깁니다.
-4. 시간 정보를 기준으로 전사문과 화자를 연결합니다.
+4. 시간 정보를 기준으로 전사문과 화자를 연결합니다. Small·Turbo는 단어 시간 정보를, Linux Large-v3는 전사 구간 시간을 사용합니다.
 
-현재는 화자 분리 후 전사를 이어서 수행하는 순차 처리 방식입니다. CPU 환경에서는 긴 파일의 전사에 시간이 걸릴 수 있으나, 타임라인·경과 시간·중단 버튼으로 현재 상태를 확인할 수 있습니다.
+현재는 화자 분리 후 전사를 이어서 수행하는 순차 처리 방식입니다. CPU 환경에서는 긴 파일의 전사에 시간이 걸릴 수 있으나, 타임라인·경과 시간·전사 처리 시각·중단 버튼으로 현재 상태를 확인할 수 있습니다.
 
 ## 상세 문서
 
