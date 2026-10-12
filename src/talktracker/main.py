@@ -481,12 +481,18 @@ class TalkTrackerApp(tk.Tk):
             messagebox.showerror(WINDOW_TITLE, f"스크립트를 시작하지 못했습니다.\n\n{error}")
             return False
 
-        self.model_setup_in_progress = True
+        # macOS streams the child process into the progress dialog, so it can
+        # be tracked precisely.  Linux and Windows intentionally leave a
+        # terminal open after the script finishes so the user can read its
+        # result.  Its launcher process therefore cannot tell whether the
+        # setup script itself has finished.  Do not leave the UI permanently
+        # locked in those environments.
+        self.model_setup_in_progress = False
         messagebox.showinfo(
             WINDOW_TITLE,
             f"{description} {SETUP_PLATFORM_NAME} 터미널 창을 열었습니다.\n\n"
             "별도로 열린 창에 완료 메시지가 나올 때까지 기다려 주세요.\n"
-            "이 모델 관리 창은 닫지 말고, 완료된 뒤 ‘상태 새로고침’을 눌러 주세요.",
+            "완료 메시지를 확인한 뒤 이 창에서 ‘상태 새로고침’을 눌러 주세요.",
         )
         return True
 
