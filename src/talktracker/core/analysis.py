@@ -461,9 +461,19 @@ class AnalysisEngine:
 
         cpu_runtime = get_cpu_runtime(self.whisper_profile)
         if not cpu_runtime:
+            details = str(gpu_error).strip()
+            if sys.platform.startswith("linux"):
+                message = (
+                    "Whisper Large-v3의 CUDA GPU 실행을 시작하지 못했습니다. "
+                    "scripts/linux/Install-Dependencies.sh를 다시 실행해 "
+                    "CUDA 12/cuDNN 9 런타임을 준비해 주세요."
+                )
+            else:
+                message = "Whisper Large-v3의 CUDA GPU 실행을 시작하지 못했습니다. GPU 드라이버와 CUDA 환경을 확인해 주세요."
+            if details:
+                message = f"{message}\n\n세부 오류: {details}"
             raise ProcessingError(
-                "Whisper Large-v3의 CUDA GPU 실행을 시작하지 못했습니다. "
-                "GPU 드라이버와 CUDA 환경을 확인해 주세요."
+                message
             ) from gpu_error
 
         cpu_model = self.project_root / "models" / cpu_runtime.folder / "model.bin"

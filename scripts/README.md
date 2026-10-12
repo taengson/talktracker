@@ -41,7 +41,7 @@ bash scripts/linux/Download-Models.sh
 bash scripts/linux/Run-Gui.sh
 ```
 
-Linux는 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받아 로컬 PyTorch 변환을 하지 않습니다. 앱은 CUDA GPU가 준비되면 GPU `float16`으로 실행하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU `int8`으로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
+Linux는 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받아 로컬 PyTorch 변환을 하지 않습니다. 앱은 CUDA GPU가 준비되면 GPU `float16`으로 실행하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU `int8`으로 자동 전환합니다. NVIDIA GPU를 감지하면 설치 스크립트가 CUDA 12용 cuBLAS와 cuDNN 9 런타임을 프로젝트 `.venv`에 설치하고 실행 시 필요한 라이브러리 경로도 설정합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
 
 화자 분리는 Nemotron GGUF와 공식 NeMo-Speech.cpp 실행기를 사용합니다. 설치 스크립트는 실행기를 프로젝트 내부 `.tools/nemo-speech`에 설치하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
 

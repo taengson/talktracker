@@ -43,7 +43,7 @@
 
 모델은 프로젝트의 `models` 폴더에 저장됩니다. 화면에서 전사 품질을 고르면 그 선택에 맞는 모델만 준비 메뉴에서 내려받아 사용할 수 있습니다.
 
-> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요하며, 준비되지 않은 환경은 자동으로 CPU `int8`을 사용합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
+> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버가 필요하며, Linux 설치 스크립트는 GPU를 감지하면 필요한 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 `.venv`에 자동으로 설치하고 실행 환경을 설정합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
 
 ## macOS에서 실행하기
 
@@ -67,7 +67,7 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 2. `bash scripts/linux/Download-Models.sh` — 바로 실행 가능한 Whisper 및 Nemotron 모델을 받습니다.
 3. 이후에는 `bash scripts/linux/Run-Gui.sh`
 
-Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. CUDA GPU 실행이 가능한 환경에서는 Small·Turbo가 GPU `float16`으로 실행되고, GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환됩니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
+Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. NVIDIA GPU가 감지되면 설치 스크립트가 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 환경에 설치해 GPU `float16` 실행을 준비합니다. Small·Turbo는 GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환되지만, Large-v3는 GPU 전용입니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 

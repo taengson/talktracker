@@ -46,7 +46,7 @@ bash scripts/linux/Install-Dependencies.sh
 bash scripts/linux/Download-Models.sh --whisper-profile small
 ```
 
-CUDA 실행 환경이 준비된 경우 앱은 받은 CTranslate2 Whisper 모델을 GPU `float16`으로 실행합니다. GPU를 시작하거나 전사하는 중 실패하면 Small·Turbo는 같은 모델을 CPU `int8`으로 다시 실행합니다. 최근 CTranslate2/faster-whisper 조합은 NVIDIA 드라이버와 CUDA 12.x 런타임, cuDNN 9가 필요합니다.
+CUDA 실행 환경이 준비된 경우 앱은 받은 CTranslate2 Whisper 모델을 GPU `float16`으로 실행합니다. GPU를 시작하거나 전사하는 중 실패하면 Small·Turbo는 같은 모델을 CPU `int8`으로 다시 실행합니다. 최근 CTranslate2/faster-whisper 조합은 CUDA 12용 cuBLAS와 cuDNN 9가 필요합니다. 설치 스크립트는 NVIDIA GPU를 감지하면 이 런타임을 프로젝트 `.venv`에 자동으로 설치하고, GUI 실행 스크립트가 필요한 라이브러리 경로를 자동으로 설정합니다.
 
 Linux ARM64 NVIDIA 시스템은 PyPI에서 CPU 전용 CTranslate2가 설치될 수 있습니다. 이때 업데이트된 `Install-Dependencies.sh`는 프로젝트 내부 `.tools/ctranslate2-cuda`에 CUDA용 CTranslate2를 한 번 빌드합니다. CUDA Toolkit의 `nvcc`와 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 없으면 설치를 멈추고 필요한 항목을 정확히 안내합니다. 빌드가 완료되면 다음 명령으로 상태를 확인합니다.
 
@@ -63,7 +63,7 @@ PY
 models/whisper-small-ct2/model.bin
 ```
 
-앱은 GPU를 우선 사용합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 같은 준비된 모델을 CPU로 실행하며, 이는 정상 동작입니다. 화자 분리는 `.tools/nemo-speech`의 공식 네이티브 실행기를 사용하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
+앱은 GPU를 우선 사용합니다. CUDA가 감지되지 않거나 준비되지 않은 경우에는 같은 준비된 모델을 CPU로 실행하며, 이는 정상 동작입니다. Large-v3는 CPU 대체가 없으므로 설치 스크립트가 CUDA 런타임 설치에 실패했다는 메시지가 나오면 먼저 그 스크립트를 다시 실행해야 합니다. 화자 분리는 `.tools/nemo-speech`의 공식 네이티브 실행기를 사용하며, NVIDIA 드라이버가 보이면 CUDA를, 그렇지 않으면 CPU를 선택합니다.
 
 GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니다.
 

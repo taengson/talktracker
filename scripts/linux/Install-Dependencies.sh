@@ -62,6 +62,22 @@ print("TalkTracker Python packages are ready.")
 PY
 }
 
+install_cuda_runtime_libraries() {
+  # The CTranslate2 wheel dynamically loads these libraries only when Whisper
+  # starts.  Installing them into .venv avoids asking the user to configure a
+  # system-wide CUDA runtime or LD_LIBRARY_PATH by hand.
+  echo "NVIDIA GPU를 감지했습니다. Whisper GPU 실행에 필요한 CUDA 12/cuDNN 9 런타임을 준비합니다..."
+  if ! "$python" -m pip install --upgrade nvidia-cublas-cu12 'nvidia-cudnn-cu12>=9,<10'; then
+    cat >&2 <<'EOF'
+Warning: TalkTracker could not install its project-local CUDA runtime libraries.
+Whisper GPU transcription may not start. Install CUDA 12 cuBLAS and cuDNN 9
+for this Linux environment, then run this script again. CPU Whisper profiles
+remain available.
+EOF
+    return 1
+  fi
+}
+
 run_as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
@@ -199,6 +215,10 @@ fi
 echo "Installing TalkTracker packages..."
 "$python" -m pip install --upgrade pip
 "$python" -m pip install -r "$requirements"
+
+if has_nvidia_gpu; then
+  install_cuda_runtime_libraries || true
+fi
 
 source "$script_dir/Configure-Cuda-Environment.sh"
 if ! dependency_check_output="$(verify_python_dependencies 2>&1)"; then
