@@ -43,6 +43,8 @@ bash scripts/linux/Run-Gui.sh
 
 CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다.
 
+기존에 설치를 마친 뒤 업데이트했다면 `./scripts/linux/Install-Dependencies.sh`를 한 번 더 실행해 새 Python 패키지(`librosa` 등)를 반영하세요.
+
 실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.
 
 ## 전사 품질 선택

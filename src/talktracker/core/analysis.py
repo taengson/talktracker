@@ -225,12 +225,20 @@ class AnalysisEngine:
         return audio, frame_count / SAMPLE_RATE
 
     def _diarize(self, audio: np.ndarray) -> list[SpeakerSegment]:
-        processor = AutoProcessor.from_pretrained(str(self.nemotron_dir), local_files_only=True)
-        model = AutoModelForAudioFrameClassification.from_pretrained(
-            str(self.nemotron_dir),
-            local_files_only=True,
-            torch_dtype=torch.float32,
-        )
+        try:
+            processor = AutoProcessor.from_pretrained(str(self.nemotron_dir), local_files_only=True)
+            model = AutoModelForAudioFrameClassification.from_pretrained(
+                str(self.nemotron_dir),
+                local_files_only=True,
+                torch_dtype=torch.float32,
+            )
+        except ImportError as error:
+            if "librosa" in str(error).lower():
+                raise ProcessingError(
+                    "화자 분리에 필요한 librosa 패키지가 없습니다. "
+                    "패키지 준비 스크립트를 다시 실행해 주세요."
+                ) from error
+            raise
         model.eval()
 
         inputs = processor(audio, sampling_rate=SAMPLE_RATE, return_tensors="pt")

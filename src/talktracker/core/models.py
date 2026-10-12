@@ -39,6 +39,14 @@ class WhisperRuntime:
         return self.device == "cuda"
 
 
+@dataclass(frozen=True)
+class CudaRuntimeStatus:
+    """The CTranslate2 CUDA capability seen by this running application."""
+
+    available: bool
+    message: str
+
+
 WHISPER_PROFILES: tuple[WhisperProfile, ...] = (
     WhisperProfile(
         key="small",
@@ -86,8 +94,8 @@ def get_whisper_profile(key: str) -> WhisperProfile:
         raise ValueError(f"알 수 없는 Whisper 프로필입니다: {key} (선택 가능: {available})") from error
 
 
-def cuda_available() -> bool:
-    """Return whether faster-whisper can actually run on the first CUDA GPU.
+def get_cuda_runtime_status() -> CudaRuntimeStatus:
+    """Describe whether faster-whisper can use CUDA in this process.
 
     PyTorch can be installed in CPU-only form while CTranslate2 has usable CUDA
     support (or vice versa), so this deliberately probes CTranslate2 itself.
@@ -95,13 +103,43 @@ def cuda_available() -> bool:
 
     try:
         import ctranslate2
+    except (ImportError, OSError, RuntimeError) as error:
+        details = str(error).strip()
+        message = "CTranslate2 패키지를 불러오지 못했습니다."
+        if details:
+            message = f"{message} {details}"
+        return CudaRuntimeStatus(False, message)
 
-        return bool(
-            ctranslate2.get_cuda_device_count()
-            and "float16" in ctranslate2.get_supported_compute_types("cuda")
+    try:
+        device_count = ctranslate2.get_cuda_device_count()
+    except (OSError, RuntimeError, ValueError) as error:
+        details = str(error).strip() or type(error).__name__
+        return CudaRuntimeStatus(False, f"CTranslate2가 CUDA를 초기화하지 못했습니다: {details}")
+
+    if not device_count:
+        return CudaRuntimeStatus(
+            False,
+            "CTranslate2가 사용할 CUDA GPU를 찾지 못했습니다. NVIDIA 드라이버와 GPU 전달 설정을 확인해 주세요.",
         )
-    except (ImportError, OSError, RuntimeError, ValueError):
-        return False
+
+    try:
+        compute_types = ctranslate2.get_supported_compute_types("cuda")
+    except (OSError, RuntimeError, ValueError) as error:
+        details = str(error).strip() or type(error).__name__
+        return CudaRuntimeStatus(False, f"CUDA GPU의 지원 형식을 확인하지 못했습니다: {details}")
+
+    if "float16" not in compute_types:
+        return CudaRuntimeStatus(
+            False,
+            "감지된 CUDA GPU가 Whisper FP16 실행을 지원하지 않습니다.",
+        )
+    return CudaRuntimeStatus(True, f"CUDA GPU {device_count}개를 감지했습니다.")
+
+
+def cuda_available() -> bool:
+    """Return whether faster-whisper can actually run on the first CUDA GPU."""
+
+    return get_cuda_runtime_status().available
 
 
 def get_cpu_runtime(profile: WhisperProfile) -> WhisperRuntime | None:

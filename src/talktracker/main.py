@@ -18,6 +18,7 @@ from .core.models import (
     WHISPER_PROFILES,
     WhisperProfile,
     cuda_available,
+    get_cuda_runtime_status,
     get_whisper_profile,
     get_whisper_runtime,
 )
@@ -345,6 +346,7 @@ class TalkTrackerApp(tk.Tk):
 
         if self.missing_models:
             profile = self.selected_whisper_profile
+            cuda_status = get_cuda_runtime_status()
             source_model_dir = PROJECT_ROOT / "models" / profile.source_folder
             source_models_missing = not (source_model_dir / "model.safetensors").is_file()
             nemotron_missing = "Nemotron 화자 분리" in self.missing_models
@@ -356,13 +358,14 @@ class TalkTrackerApp(tk.Tk):
                     lambda: self.start_package_install(dialog),
                     primary=True,
                 ).pack(side="right")
-            elif profile.requires_gpu and not self._gpu_available():
+            elif profile.requires_gpu and not cuda_status.available:
                 tk.Label(
                     actions,
-                    text="Large-v3는 호환 GPU가 있는 PC에서 준비할 수 있습니다.",
+                    text=f"Large-v3는 CUDA GPU가 필요합니다.\n{cuda_status.message}",
                     bg=self.GROUND,
                     fg="#99601C",
                     font=("Segoe UI", 9, "bold"),
+                    justify="right",
                 ).pack(side="right")
             elif source_models_missing or nemotron_missing:
                 self._button(
@@ -600,7 +603,7 @@ class TalkTrackerApp(tk.Tk):
         self.whisper_profile_hint.set(profile.description)
         self.refresh_model_status()
         if profile.requires_gpu and not self._gpu_available():
-            self._set_status("최고 정확도 모델은 호환 GPU가 필요합니다. 현재 PC에서는 실행할 수 없습니다.")
+            self._set_status(f"최고 정확도 모델은 CUDA GPU가 필요합니다. {get_cuda_runtime_status().message}")
         elif self.missing_models:
             self._set_status(f"{profile.short_label} 전사 모델을 준비한 뒤 분석할 수 있습니다.")
         else:
@@ -697,10 +700,12 @@ class TalkTrackerApp(tk.Tk):
             return
         profile = self.selected_whisper_profile
         if profile.requires_gpu and not self._gpu_available():
+            cuda_status = get_cuda_runtime_status()
             messagebox.showwarning(
                 WINDOW_TITLE,
                 "‘최고 정확도’ 모델은 호환 CUDA GPU가 필요합니다.\n\n"
-                "현재 PC에서는 ‘권장’ 또는 ‘빠른 전사’를 선택해 주세요.",
+                f"확인 결과: {cuda_status.message}\n\n"
+                "NVIDIA 드라이버, CUDA 12.x, cuDNN 8 또는 GPU 전달 설정을 확인한 뒤 다시 시도해 주세요.",
             )
             return
         self.refresh_model_status()
