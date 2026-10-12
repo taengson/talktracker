@@ -96,6 +96,34 @@ bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarizat
 
 > **Large-v3 오류 확인:** 누락된 모델 파일은 분석 전에 바로 안내됩니다. CUDA GPU가 이미 시작된 뒤 발생한 전사 오류는 설치 오류로 단정하지 않으며, 앱은 실행 환경, 모델 구성, CTranslate2·faster-whisper 버전, 원본 예외를 `outputs/diagnostics/whisper-large-v3-*.log`에 기록합니다.
 
+### SSH로 컴퓨터 사이에 파일 주고받기
+
+두 컴퓨터가 SSH로 연결되어 있다면 Samba를 따로 설정하지 않아도 `scp`로 녹음 파일과 결과를 전송할 수 있습니다. 아래 예시의 `user@remote-host`는 **SSH 원격 컴퓨터의 사용자와 호스트 이름**으로 바꾸세요.
+
+처음 한 번, SSH 원격 컴퓨터에 녹음 파일을 둘 폴더를 만듭니다. 이 명령은 현재 컴퓨터의 터미널에서 실행합니다.
+
+```bash
+ssh user@remote-host 'mkdir -p ~/talktracker-recordings'
+```
+
+#### 보내기: 현재 컴퓨터 → SSH 원격 컴퓨터
+
+현재 컴퓨터에 있는 녹음 파일을 SSH 원격 컴퓨터로 보냅니다. 이 명령은 **보내는 쪽인 현재 컴퓨터**에서 실행합니다.
+
+```bash
+scp "/경로/녹음파일.m4a" user@remote-host:~/talktracker-recordings/
+```
+
+#### 가져오기: SSH 원격 컴퓨터 → 현재 컴퓨터
+
+SSH 원격 컴퓨터에 있는 녹음 파일 또는 결과 파일을 현재 컴퓨터의 `Downloads` 폴더로 가져옵니다. 이 명령은 **받는 쪽인 현재 컴퓨터**에서 실행합니다.
+
+```bash
+scp user@remote-host:~/talktracker-recordings/파일명.m4a ~/Downloads/
+```
+
+대용량 파일을 여러 번 옮기거나 중단 후 이어받아야 하면 같은 경로에 `rsync -avP`를 사용할 수 있습니다.
+
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 
 ## 처리 순서
@@ -110,6 +138,7 @@ bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarizat
 ## 상세 문서
 
 - [개발 계획서](docs/development-plan.md)
+- [웹 서버 모드 구현 계획](docs/web-server-plan.md)
 - [현재 구현 상태와 검증 메모](docs/implementation-status.md)
 - [Linux 검증 가이드](docs/linux-test-guide.md)
 - [스크립트 안내](scripts/README.md)
