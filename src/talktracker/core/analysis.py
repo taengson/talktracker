@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import shutil
 import signal
@@ -10,9 +11,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import wave
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -150,7 +153,7 @@ class AnalysisEngine:
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
 
             self._notify(progress, 52, "음성을 전사하고 있습니다…")
-            transcript_chunks, cancelled = self._transcribe(normalized, should_cancel, progress)
+            transcript_chunks, cancelled = self._transcribe(normalized, duration, should_cancel, progress)
             self._release_memory()
             if cancelled or self._cancelled(should_cancel):
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
@@ -190,10 +193,38 @@ class AnalysisEngine:
         ]
         if missing:
             raise ProcessingError(f"로컬 모델이 준비되지 않았습니다: {', '.join(missing)}")
+        self._validate_whisper_model_config()
         if IS_NATIVE_DIARIZATION and not self._nemo_speech_binary():
             raise ProcessingError(
                 "화자 분리 실행기가 준비되지 않았습니다. "
                 "현재 운영체제의 Install-Dependencies 스크립트를 다시 실행해 주세요."
+            )
+
+    def _validate_whisper_model_config(self) -> None:
+        """Fail early when a partial CTranslate2 model download is detected.
+
+        CTranslate2 reads these values lazily while decoding.  Without this
+        preflight check, an incomplete config can look like a CUDA failure only
+        after the lengthy speaker-separation step has already completed.
+        """
+
+        assert self.whisper_runtime is not None
+        config_path = self.project_root / "models" / self.whisper_runtime.folder / "config.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ProcessingError(
+                f"Whisper 모델 구성 파일을 읽지 못했습니다: {config_path.name}. "
+                "로컬 모델 관리에서 선택 모델을 다시 준비해 주세요."
+            ) from error
+
+        required_keys = ("lang_ids", "suppress_ids", "suppress_ids_begin")
+        invalid_keys = [key for key in required_keys if not isinstance(config.get(key), list)]
+        if invalid_keys:
+            joined_keys = ", ".join(invalid_keys)
+            raise ProcessingError(
+                "Whisper 모델 구성 파일이 완전하지 않습니다 "
+                f"({joined_keys}). 로컬 모델 관리에서 선택 모델을 다시 준비해 주세요."
             )
 
     def _normalise_audio(self, source: Path, destination: Path) -> None:
@@ -428,6 +459,7 @@ class AnalysisEngine:
     def _transcribe(
         self,
         normalized_audio: Path,
+        duration: float,
         should_cancel: CancelCallback | None,
         progress: ProgressCallback | None,
     ) -> tuple[list[TranscriptChunk], bool]:
@@ -448,17 +480,33 @@ class AnalysisEngine:
             return self._collect_transcript(
                 model,
                 normalized_audio,
+                duration,
                 should_cancel,
+                progress,
                 word_timestamps=self._uses_word_timestamps(),
             )
         except (OSError, RuntimeError, ValueError) as error:
+            # Large-v3 deliberately has no CPU fallback.  More importantly,
+            # a decoding failure is not evidence that CUDA failed to start:
+            # the former can occur minutes after a successful GPU load.
+            if self.whisper_profile.requires_gpu:
+                self._raise_transcription_failure(error, normalized_audio, word_timestamps=self._uses_word_timestamps())
             cpu_model = self._load_cpu_fallback(WhisperModel, error, progress)
-            return self._collect_transcript(
-                cpu_model,
-                normalized_audio,
-                should_cancel,
-                word_timestamps=self._uses_word_timestamps(),
-            )
+            try:
+                return self._collect_transcript(
+                    cpu_model,
+                    normalized_audio,
+                    duration,
+                    should_cancel,
+                    progress,
+                    word_timestamps=self._uses_word_timestamps(),
+                )
+            except (OSError, RuntimeError, ValueError) as cpu_error:
+                self._raise_transcription_failure(
+                    cpu_error,
+                    normalized_audio,
+                    word_timestamps=self._uses_word_timestamps(),
+                )
 
     def _uses_word_timestamps(self) -> bool:
         """Return whether to request Whisper's optional word alignment pass.
@@ -476,7 +524,9 @@ class AnalysisEngine:
         self,
         model: Any,
         normalized_audio: Path,
+        duration: float,
         should_cancel: CancelCallback | None,
+        progress: ProgressCallback | None,
         *,
         word_timestamps: bool,
     ) -> tuple[list[TranscriptChunk], bool]:
@@ -496,6 +546,7 @@ class AnalysisEngine:
             options["language"] = language
         segments, _info = model.transcribe(str(normalized_audio), **options)
         chunks: list[TranscriptChunk] = []
+        last_progress = 52
         for segment in segments:
             if self._cancelled(should_cancel):
                 return chunks, True
@@ -507,11 +558,102 @@ class AnalysisEngine:
                     start = float(word.start or segment.start)
                     end = float(word.end if word.end is not None else start)
                     chunks.append(TranscriptChunk(start=start, end=max(start, end), text=text))
-                continue
-            text = segment.text.strip()
-            if text:
-                chunks.append(TranscriptChunk(start=float(segment.start), end=float(segment.end), text=text))
+            else:
+                text = segment.text.strip()
+                if text:
+                    chunks.append(TranscriptChunk(start=float(segment.start), end=float(segment.end), text=text))
+            if duration > 0:
+                fraction = min(1.0, max(0.0, float(segment.end) / duration))
+                current_progress = min(90, 52 + int(fraction * 38))
+                if current_progress > last_progress:
+                    last_progress = current_progress
+                    self._notify(
+                        progress,
+                        current_progress,
+                        f"음성을 전사하고 있습니다… {_format_time(float(segment.end))} / {_format_time(duration)}",
+                    )
         return chunks, False
+
+    def _raise_transcription_failure(
+        self,
+        error: Exception,
+        normalized_audio: Path,
+        *,
+        word_timestamps: bool,
+    ) -> None:
+        """Report a decoder error without incorrectly blaming CUDA setup."""
+
+        diagnostic_path = self._write_transcription_diagnostic(
+            error,
+            normalized_audio,
+            word_timestamps=word_timestamps,
+            traceback_text=traceback.format_exc(),
+        )
+        runtime_label = self.whisper_runtime.label if self.whisper_runtime else "알 수 없는 실행 환경"
+        message = (
+            f"{self.whisper_profile.short_label} Whisper 전사 중 오류가 발생했습니다.\n"
+            f"CUDA 시작 오류로 단정할 수 없습니다. 실제 전사 처리 중 발생한 오류입니다.\n\n"
+            f"실행 환경: {runtime_label}\n"
+            f"세부 오류: {error}"
+        )
+        if diagnostic_path:
+            message = f"{message}\n\n진단 로그: {diagnostic_path}"
+        raise ProcessingError(message) from error
+
+    def _write_transcription_diagnostic(
+        self,
+        error: Exception,
+        normalized_audio: Path,
+        *,
+        word_timestamps: bool,
+        traceback_text: str,
+    ) -> Path | None:
+        """Persist the runtime facts needed to reproduce a local decoder error."""
+
+        try:
+            assert self.whisper_runtime is not None
+            model_dir = self.project_root / "models" / self.whisper_runtime.folder
+            config_path = model_dir / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config_summary = {
+                key: type(config.get(key)).__name__
+                for key in ("lang_ids", "suppress_ids", "suppress_ids_begin", "alignment_heads")
+            }
+
+            import ctranslate2
+            import faster_whisper
+
+            diagnostics_dir = self.project_root / "outputs" / "diagnostics"
+            diagnostics_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            destination = diagnostics_dir / f"whisper-{self.whisper_profile.key}-{timestamp}.log"
+            details = [
+                "TalkTracker Whisper diagnostic",
+                f"created_at: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+                f"platform: {sys.platform}",
+                f"profile: {self.whisper_profile.key}",
+                f"runtime: {self.whisper_runtime.label}",
+                f"model_dir: {model_dir}",
+                f"model_bin_bytes: {(model_dir / 'model.bin').stat().st_size}",
+                f"normalized_audio_bytes: {normalized_audio.stat().st_size}",
+                f"language: {os.environ.get('TALKTRACKER_LANGUAGE', DEFAULT_TRANSCRIPTION_LANGUAGE).strip() or 'auto'}",
+                f"word_timestamps: {word_timestamps}",
+                "vad_filter: True",
+                "condition_on_previous_text: False",
+                f"ctranslate2_version: {ctranslate2.__version__}",
+                f"faster_whisper_version: {getattr(faster_whisper, '__version__', 'unknown')}",
+                f"config_value_types: {json.dumps(config_summary, ensure_ascii=False, sort_keys=True)}",
+                f"error_type: {type(error).__name__}",
+                f"error: {error}",
+                "",
+                "traceback:",
+                traceback_text.rstrip(),
+                "",
+            ]
+            destination.write_text("\n".join(details), encoding="utf-8")
+            return destination
+        except (OSError, json.JSONDecodeError, ImportError, AssertionError):
+            return None
 
     def _load_whisper_model(self, whisper_model: Any, runtime: WhisperRuntime) -> Any:
         model_options: dict[str, Any] = {
