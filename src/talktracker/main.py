@@ -22,6 +22,7 @@ from .core.models import (
     get_cuda_runtime_status,
     get_whisper_profile,
     get_whisper_runtime,
+    missing_whisper_runtime_files,
 )
 
 if TYPE_CHECKING:
@@ -299,10 +300,15 @@ class TalkTrackerApp(tk.Tk):
 
     def refresh_model_status(self) -> None:
         """Reflect whether the selected local transcription profile is ready to load."""
+        whisper_label = self._whisper_model_label()
         self.missing_models = [
             label
             for label, (location, weight_file) in self._model_locations().items()
-            if not (location / weight_file).is_file()
+            if (
+                bool(missing_whisper_runtime_files(location))
+                if label == whisper_label
+                else not (location / weight_file).is_file()
+            )
         ]
         self.nemotron_runtime_missing = USES_NATIVE_NEMOTRON and not self._native_nemotron_runtime_available()
         connection_count = len(self.missing_models) + int(self.nemotron_runtime_missing)

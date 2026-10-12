@@ -72,11 +72,31 @@ mkdir -p "$models_root"
 
 download_prepared_whisper() {
   local destination="$models_root/$whisper_folder"
-  echo "Downloading pre-converted $whisper_repository"
+  local required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
+  local missing_files=()
+  local file
+  for file in "${required_files[@]}"; do
+    [[ -f "$destination/$file" ]] || missing_files+=("$file")
+  done
+  if [[ ${#missing_files[@]} -eq 0 ]]; then
+    echo "Already ready: $destination"
+    return
+  fi
+
+  echo "Completing pre-converted $whisper_repository"
   echo "Destination: $destination"
+  echo "Missing files: ${missing_files[*]}"
   "$hugging_face" download "$whisper_repository" \
     --local-dir "$destination" \
-    --include config.json preprocessor_config.json model.bin tokenizer.json 'vocabulary.*'
+    --force-download \
+    "${missing_files[@]}"
+
+  for file in "${required_files[@]}"; do
+    [[ -f "$destination/$file" ]] || {
+      echo "Whisper model download did not provide the required file: $file" >&2
+      exit 1
+    }
+  done
 }
 
 download_diarization_model() {

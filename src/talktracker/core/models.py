@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import sys
 
 
@@ -83,6 +84,23 @@ WHISPER_PROFILES: tuple[WhisperProfile, ...] = (
 )
 
 _PROFILES_BY_KEY = {profile.key: profile for profile in WHISPER_PROFILES}
+
+# A CTranslate2 Whisper folder is not usable with model.bin alone.  Keep this
+# list in one place so the GUI never reports a partially downloaded model as
+# ready while the analysis engine later fails to load it.
+WHISPER_RUNTIME_FILES: tuple[str, ...] = (
+    "config.json",
+    "preprocessor_config.json",
+    "model.bin",
+    "tokenizer.json",
+    "vocabulary.json",
+)
+
+
+def missing_whisper_runtime_files(model_directory: Path) -> tuple[str, ...]:
+    """Return the required CTranslate2 Whisper files absent from a folder."""
+
+    return tuple(name for name in WHISPER_RUNTIME_FILES if not (model_directory / name).is_file())
 
 
 def get_whisper_profile(key: str) -> WhisperProfile:

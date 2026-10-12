@@ -64,12 +64,17 @@ esac
 # selection remains automatic in the application: CUDA FP16 when available,
 # then CPU INT8 for Small and Turbo.
 destination="$project_root/models/$destination_folder"
+required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
 if [[ ! -x "$hugging_face" ]]; then
   echo "Hugging Face CLI was not found: $hugging_face" >&2
   echo "Run scripts/linux/Install-Dependencies.sh first." >&2
   exit 1
 fi
-if [[ -f "$destination/model.bin" ]]; then
+missing_files=()
+for file in "${required_files[@]}"; do
+  [[ -f "$destination/$file" ]] || missing_files+=("$file")
+done
+if [[ ${#missing_files[@]} -eq 0 ]]; then
   echo "Already ready: $destination"
   exit 0
 fi
@@ -78,9 +83,16 @@ echo "Preparing $display_name for local inference..."
 echo "Downloading a pre-converted CTranslate2 model; no local INT8 conversion is performed on Linux."
 echo "Repository: $repository"
 echo "Destination: $destination"
+echo "Missing files: ${missing_files[*]}"
 "$hugging_face" download "$repository" \
   --local-dir "$destination" \
-  --include config.json preprocessor_config.json model.bin tokenizer.json 'vocabulary.*'
-[[ -f "$destination/model.bin" ]] || { echo "Whisper model preparation did not complete successfully." >&2; exit 1; }
+  --force-download \
+  "${missing_files[@]}"
+for file in "${required_files[@]}"; do
+  [[ -f "$destination/$file" ]] || {
+    echo "Whisper model preparation did not provide the required file: $file" >&2
+    exit 1
+  }
+done
 echo
 echo "Done. TalkTracker will use the prepared model from: $destination"

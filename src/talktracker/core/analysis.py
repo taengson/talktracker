@@ -30,7 +30,14 @@ if not IS_NATIVE_DIARIZATION:
     import torch
     from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-from .models import WhisperProfile, WhisperRuntime, get_cpu_runtime, get_whisper_profile, get_whisper_runtime
+from .models import (
+    WhisperProfile,
+    WhisperRuntime,
+    get_cpu_runtime,
+    get_whisper_profile,
+    get_whisper_runtime,
+    missing_whisper_runtime_files,
+)
 
 
 SAMPLE_RATE = 16_000
@@ -175,22 +182,16 @@ class AnalysisEngine:
                 "Whisper Large-v3는 호환 CUDA GPU가 필요합니다. "
                 "현재 PC에서는 ‘권장’ 또는 ‘빠른 전사’를 선택해 주세요."
             )
-        missing = [
-            name
-            for name, directory, weight_file in (
-                (
-                    f"{self.whisper_profile.short_label} Whisper 모델 ({self.whisper_runtime.label})",
-                    self.project_root / "models" / self.whisper_runtime.folder,
-                    "model.bin",
-                ),
-                (
-                    "Nemotron",
-                    self.nemotron_dir,
-                    "Nemotron-3-Diarization.q8_0.gguf" if IS_NATIVE_DIARIZATION else "model.safetensors",
-                ),
+        whisper_directory = self.project_root / "models" / self.whisper_runtime.folder
+        missing = []
+        missing_whisper_files = missing_whisper_runtime_files(whisper_directory)
+        if missing_whisper_files:
+            missing.append(
+                f"{self.whisper_profile.short_label} Whisper 모델 ({', '.join(missing_whisper_files)} 없음)"
             )
-            if not (directory / weight_file).is_file()
-        ]
+        nemotron_weight = "Nemotron-3-Diarization.q8_0.gguf" if IS_NATIVE_DIARIZATION else "model.safetensors"
+        if not (self.nemotron_dir / nemotron_weight).is_file():
+            missing.append("Nemotron")
         if missing:
             raise ProcessingError(f"로컬 모델이 준비되지 않았습니다: {', '.join(missing)}")
         self._validate_whisper_model_config()
