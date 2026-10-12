@@ -41,7 +41,7 @@
 
 모델은 프로젝트의 `models` 폴더에 저장됩니다. 화면에서 전사 품질을 고르면 그 선택에 맞는 모델만 준비 메뉴에서 내려받아 사용할 수 있습니다.
 
-> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요하며, 준비되지 않은 환경은 자동으로 CPU `int8`을 사용합니다.
+> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요하며, 준비되지 않은 환경은 자동으로 CPU `int8`을 사용합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
 
 ## macOS에서 실행하기
 

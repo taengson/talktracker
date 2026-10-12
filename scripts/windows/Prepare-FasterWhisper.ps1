@@ -103,13 +103,13 @@ switch ($Runtime) {
     }
     'cuda' {
         if (-not $CudaAvailable) {
-            throw 'CUDA GPU FP16 실행을 사용할 수 없습니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8을 확인해 주세요.'
+            throw 'CUDA GPU FP16 실행을 사용할 수 없습니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9를 확인해 주세요.'
         }
         $Targets = @('cuda')
     }
     'both' {
         if (-not $CudaAvailable) {
-            throw 'CUDA GPU FP16 실행을 사용할 수 없습니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8을 확인해 주세요.'
+            throw 'CUDA GPU FP16 실행을 사용할 수 없습니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9를 확인해 주세요.'
         }
         $Targets = if ($SelectedWhisper.CpuDestinationFolder) { @('cpu', 'cuda') } else { @('cuda') }
     }
@@ -119,7 +119,7 @@ switch ($Runtime) {
         } elseif ($SelectedWhisper.CpuDestinationFolder) {
             $Targets = @('cpu')
         } else {
-            throw 'Whisper Large-v3는 호환 CUDA GPU가 필요합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8을 확인해 주세요.'
+            throw 'Whisper Large-v3는 호환 CUDA GPU가 필요합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9를 확인해 주세요.'
         }
     }
 }

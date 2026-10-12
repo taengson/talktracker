@@ -705,7 +705,7 @@ class TalkTrackerApp(tk.Tk):
                 WINDOW_TITLE,
                 "‘최고 정확도’ 모델은 호환 CUDA GPU가 필요합니다.\n\n"
                 f"확인 결과: {cuda_status.message}\n\n"
-                "NVIDIA 드라이버, CUDA 12.x, cuDNN 8 또는 GPU 전달 설정을 확인한 뒤 다시 시도해 주세요.",
+                "NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9 또는 GPU 전달 설정을 확인한 뒤 다시 시도해 주세요.",
             )
             return
         self.refresh_model_status()

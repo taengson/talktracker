@@ -111,22 +111,28 @@ def get_cuda_runtime_status() -> CudaRuntimeStatus:
         return CudaRuntimeStatus(False, message)
 
     try:
+        compute_types = ctranslate2.get_supported_compute_types("cuda")
+    except (OSError, RuntimeError, ValueError) as error:
+        details = str(error).strip() or type(error).__name__
+        if "not compiled with CUDA support" in details:
+            return CudaRuntimeStatus(
+                False,
+                "설치된 CTranslate2가 CUDA 없이 빌드된 CPU 전용판입니다. "
+                "GPU 환경에서는 현재 운영체제의 Install-Dependencies 스크립트를 다시 실행해 주세요.",
+            )
+        return CudaRuntimeStatus(False, f"CTranslate2가 CUDA를 초기화하지 못했습니다: {details}")
+
+    try:
         device_count = ctranslate2.get_cuda_device_count()
     except (OSError, RuntimeError, ValueError) as error:
         details = str(error).strip() or type(error).__name__
-        return CudaRuntimeStatus(False, f"CTranslate2가 CUDA를 초기화하지 못했습니다: {details}")
+        return CudaRuntimeStatus(False, f"CTranslate2가 CUDA GPU를 확인하지 못했습니다: {details}")
 
     if not device_count:
         return CudaRuntimeStatus(
             False,
             "CTranslate2가 사용할 CUDA GPU를 찾지 못했습니다. NVIDIA 드라이버와 GPU 전달 설정을 확인해 주세요.",
         )
-
-    try:
-        compute_types = ctranslate2.get_supported_compute_types("cuda")
-    except (OSError, RuntimeError, ValueError) as error:
-        details = str(error).strip() or type(error).__name__
-        return CudaRuntimeStatus(False, f"CUDA GPU의 지원 형식을 확인하지 못했습니다: {details}")
 
     if "float16" not in compute_types:
         return CudaRuntimeStatus(

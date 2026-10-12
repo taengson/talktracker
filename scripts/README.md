@@ -15,7 +15,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-FasterWhisper
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Gui.ps1
 ```
 
-CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. CTranslate2 GPU 실행에는 NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다.
+CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. CTranslate2 GPU 실행에는 NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다.
 
 ## macOS
 
@@ -41,7 +41,7 @@ bash scripts/linux/Prepare-FasterWhisper.sh
 bash scripts/linux/Run-Gui.sh
 ```
 
-CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다.
+CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. NVIDIA GPU가 보이는데도 PyPI가 CPU 전용 CTranslate2를 설치한 Linux ARM64 환경에서는 설치 스크립트가 CTranslate2 CUDA 바인딩을 프로젝트 내부 `.tools`에 한 번 빌드합니다. 이 단계에는 CUDA Toolkit(`nvcc`)과 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 있어야 하며, 처음만 몇 분 걸릴 수 있습니다.
 
 기존에 설치를 마친 뒤 업데이트했다면 `./scripts/linux/Install-Dependencies.sh`를 한 번 더 실행해 새 Python 패키지(`librosa` 등)를 반영하세요.
 

@@ -13,3 +13,6 @@ transformers
 accelerate
 huggingface_hub
 faster-whisper
+# Keep the Python wheel and the optional Linux CUDA source build on the same
+# CTranslate2 release. faster-whisper accepts the 4.x series.
+ctranslate2==4.8.2

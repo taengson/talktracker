@@ -56,7 +56,7 @@ $CudaReady = $LASTEXITCODE -eq 0
 if ($CudaReady) {
     Write-Host 'CUDA GPU Whisper 실행 환경을 확인했습니다. 모델 준비 시 GPU FP16 모델도 함께 만듭니다.' -ForegroundColor Cyan
 } elseif (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-    Write-Warning 'NVIDIA GPU는 감지했지만 CTranslate2 CUDA 실행 환경은 준비되지 않았습니다. GPU 전사를 쓰려면 CUDA 12.x와 cuDNN 8을 설치한 뒤 다시 실행해 주세요. 그전에는 CPU INT8로 동작합니다.'
+    Write-Warning 'NVIDIA GPU는 감지했지만 CTranslate2 CUDA 실행 환경은 준비되지 않았습니다. GPU 전사를 쓰려면 CUDA 12.x 런타임과 cuDNN 9를 설치한 뒤 다시 실행해 주세요. 그전에는 CPU INT8로 동작합니다.'
 }
 
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {

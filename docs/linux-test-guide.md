@@ -43,10 +43,22 @@ NVIDIA GPU가 있다면 드라이버 상태를 먼저 확인합니다.
 
 ```bash
 nvidia-smi
+bash scripts/linux/Install-Dependencies.sh
 bash scripts/linux/Prepare-FasterWhisper.sh --whisper-profile small --runtime auto
 ```
 
-CUDA 실행 환경이 준비된 경우 준비 스크립트는 GPU `float16` 모델과 CPU `int8` 대체 모델을 모두 만듭니다.
+CUDA 실행 환경이 준비된 경우 준비 스크립트는 GPU `float16` 모델과 CPU `int8` 대체 모델을 모두 만듭니다. 최근 CTranslate2/faster-whisper 조합은 NVIDIA 드라이버와 CUDA 12.x 런타임, cuDNN 9가 필요합니다.
+
+Linux ARM64 NVIDIA 시스템은 PyPI에서 CPU 전용 CTranslate2가 설치될 수 있습니다. 이때 업데이트된 `Install-Dependencies.sh`는 프로젝트 내부 `.tools/ctranslate2-cuda`에 CUDA용 CTranslate2를 한 번 빌드합니다. CUDA Toolkit의 `nvcc`와 cuDNN 개발 파일(`cudnn.h`, `libcudnn.so`)이 없으면 설치를 멈추고 필요한 항목을 정확히 안내합니다. 빌드가 완료되면 다음 명령으로 상태를 확인합니다.
+
+```bash
+source scripts/linux/Configure-Cuda-Environment.sh
+.venv/bin/python - <<'PY'
+import ctranslate2 as ct
+print("CUDA devices:", ct.get_cuda_device_count())
+print("CUDA compute types:", sorted(ct.get_supported_compute_types("cuda")))
+PY
+```
 
 ```text
 models/whisper-small-ct2/model.bin
@@ -58,7 +70,8 @@ models/whisper-small-ct2-cuda-fp16/model.bin
 `--runtime cuda` 또는 `--runtime both`는 CUDA 실행 환경이 확인될 때만 사용할 수 있습니다. GPU 상태를 좀 더 확인하려면 설치 후 아래 명령을 실행합니다.
 
 ```bash
-.venv/bin/python -c 'import ctranslate2 as ct; print("CUDA devices:", ct.get_cuda_device_count()); print("CPU compute types:", sorted(ct.get_supported_compute_types("cpu")))'
+source scripts/linux/Configure-Cuda-Environment.sh
+.venv/bin/python -c 'import ctranslate2 as ct; print("CUDA devices:", ct.get_cuda_device_count()); print("CUDA compute types:", sorted(ct.get_supported_compute_types("cuda")))'
 ```
 
 ## 테스트 결과에 포함할 내용

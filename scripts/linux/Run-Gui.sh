@@ -22,5 +22,6 @@ if [[ ! -d "$source_root" ]]; then
   exit 1
 fi
 
+source "$script_dir/Configure-Cuda-Environment.sh"
 export PYTHONPATH="$source_root${PYTHONPATH:+:$PYTHONPATH}"
 exec "$python" -m talktracker

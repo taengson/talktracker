@@ -9,6 +9,35 @@ requirements="$project_root/requirements.txt"
 venv_root="$project_root/.venv"
 python="$venv_root/bin/python"
 
+probe_ctranslate2_cuda() {
+  "$python" - <<'PY'
+import sys
+
+import ctranslate2 as ct
+
+try:
+    compute_types = ct.get_supported_compute_types("cuda")
+except (OSError, RuntimeError, ValueError) as error:
+    print(error, file=sys.stderr)
+    if "not compiled with CUDA support" in str(error):
+        raise SystemExit(2)
+    raise SystemExit(3)
+
+device_count = ct.get_cuda_device_count()
+if device_count < 1:
+    print("CTranslate2 can use CUDA but no GPU is visible to this process.", file=sys.stderr)
+    raise SystemExit(4)
+if "float16" not in compute_types:
+    print(f"The detected GPU does not support Whisper FP16: {sorted(compute_types)}", file=sys.stderr)
+    raise SystemExit(5)
+print(f"CUDA GPU Whisper execution is ready ({device_count} GPU(s)).")
+PY
+}
+
+has_nvidia_gpu() {
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
+}
+
 run_as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
@@ -113,10 +142,36 @@ echo "Installing TalkTracker packages..."
 "$python" -m pip install --upgrade pip
 "$python" -m pip install -r "$requirements"
 
-if "$python" -c 'import ctranslate2, sys; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 and "float16" in ctranslate2.get_supported_compute_types("cuda") else 1)'; then
-  echo "CUDA GPU Whisper execution is ready. Model preparation will create GPU and CPU fallback models."
-elif command -v nvidia-smi >/dev/null 2>&1; then
-  echo "Warning: An NVIDIA GPU was found, but CTranslate2 CUDA execution is not ready. Install CUDA 12.x and cuDNN 8 to enable GPU transcription; TalkTracker will use CPU INT8 meanwhile." >&2
+source "$script_dir/Configure-Cuda-Environment.sh"
+
+cuda_probe_output=""
+if cuda_probe_output="$(probe_ctranslate2_cuda 2>&1)"; then
+  echo "$cuda_probe_output"
+  echo "Model preparation will create GPU and CPU fallback models."
+else
+  cuda_probe_status=$?
+  if has_nvidia_gpu && [[ "$cuda_probe_status" -eq 2 ]]; then
+    cat <<'EOF'
+An NVIDIA GPU is visible, but PyPI installed a CPU-only CTranslate2 package.
+TalkTracker will now build a project-local CUDA-enabled CTranslate2 binding.
+This is expected on some Linux ARM64 NVIDIA systems and takes a few minutes once.
+EOF
+    bash "$script_dir/Build-CTranslate2-CUDA.sh"
+    source "$script_dir/Configure-Cuda-Environment.sh"
+    cuda_probe_output="$(probe_ctranslate2_cuda 2>&1)" || {
+      echo "CTranslate2 CUDA verification failed after the build:" >&2
+      echo "$cuda_probe_output" >&2
+      exit 1
+    }
+    echo "$cuda_probe_output"
+    echo "Model preparation will create GPU and CPU fallback models."
+  elif has_nvidia_gpu; then
+    cat >&2 <<EOF
+Warning: An NVIDIA GPU was found, but CTranslate2 CUDA execution is not ready.
+$cuda_probe_output
+Install CUDA 12.x runtime libraries and cuDNN 9, or ensure the GPU is passed through to this Linux environment. TalkTracker can use CPU INT8 meanwhile.
+EOF
+  fi
 fi
 
 echo

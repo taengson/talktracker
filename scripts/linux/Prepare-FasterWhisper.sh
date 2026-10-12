@@ -10,6 +10,21 @@ python="$project_root/.venv/bin/python"
 whisper_profile="turbo"
 runtime="auto"
 
+probe_ctranslate2_cuda() {
+  "$python" - <<'PY'
+import sys
+
+import ctranslate2 as ct
+
+try:
+    compute_types = ct.get_supported_compute_types("cuda")
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+
+raise SystemExit(0 if ct.get_cuda_device_count() > 0 and "float16" in compute_types else 1)
+PY
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/linux/Prepare-FasterWhisper.sh [options]
@@ -80,7 +95,9 @@ if [[ ! -x "$converter" || ! -x "$python" ]]; then
   exit 1
 fi
 
-if "$python" -c 'import ctranslate2, sys; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 and "float16" in ctranslate2.get_supported_compute_types("cuda") else 1)'; then
+source "$script_dir/Configure-Cuda-Environment.sh"
+
+if probe_ctranslate2_cuda; then
   cuda_available=true
 else
   cuda_available=false
@@ -89,10 +106,10 @@ fi
 if [[ "$runtime" == "cpu" ]]; then
   targets=(cpu)
 elif [[ "$runtime" == "cuda" ]]; then
-  [[ "$cuda_available" == true ]] || { echo "CUDA FP16 is unavailable. Check the NVIDIA driver, CUDA 12.x, and cuDNN 8." >&2; exit 1; }
+  [[ "$cuda_available" == true ]] || { echo "CUDA FP16 is unavailable. Run scripts/linux/Install-Dependencies.sh again, then check the NVIDIA driver, CUDA 12.x runtime libraries, and cuDNN 9." >&2; exit 1; }
   targets=(cuda)
 elif [[ "$runtime" == "both" ]]; then
-  [[ "$cuda_available" == true ]] || { echo "CUDA FP16 is unavailable. Check the NVIDIA driver, CUDA 12.x, and cuDNN 8." >&2; exit 1; }
+  [[ "$cuda_available" == true ]] || { echo "CUDA FP16 is unavailable. Run scripts/linux/Install-Dependencies.sh again, then check the NVIDIA driver, CUDA 12.x runtime libraries, and cuDNN 9." >&2; exit 1; }
   [[ -n "$cpu_folder" ]] && targets=(cpu cuda) || targets=(cuda)
 elif [[ "$cuda_available" == true ]]; then
   [[ -n "$cpu_folder" ]] && targets=(cpu cuda) || targets=(cuda)

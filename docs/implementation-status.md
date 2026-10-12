@@ -51,7 +51,7 @@
 | Whisper 모델 준비 | Windows: `scripts/windows/Prepare-FasterWhisper.ps1` · macOS: `scripts/macos/Prepare-FasterWhisper.sh` · Linux: `scripts/linux/Prepare-FasterWhisper.sh` |
 | 프로그램 실행 | Windows: `scripts/windows/Run-Gui.ps1` · macOS: `scripts/macos/Run-Gui.sh` · Linux: `scripts/linux/Run-Gui.sh` |
 
-FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면 준비 스크립트가 안내를 표시합니다. Windows·Linux에서 CUDA GPU 전사를 사용하려면 NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다. 조건을 충족하지 않거나 GPU 모델 로드에 실패하면 Small·Turbo는 CPU `int8`으로 실행합니다.
+FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면 준비 스크립트가 안내를 표시합니다. Windows·Linux에서 CUDA GPU 전사를 사용하려면 NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다. 조건을 충족하지 않거나 GPU 모델 로드에 실패하면 Small·Turbo는 CPU `int8`으로 실행합니다.
 
 macOS에서는 Small·Turbo 프로필을 CPU `int8`로 실행합니다. Windows·Linux는 CTranslate2 CUDA 실행 환경을 감지하면 GPU를 우선 사용합니다. Large-v3는 CUDA GPU가 필요하므로 macOS에서는 선택할 수 없습니다.
 
