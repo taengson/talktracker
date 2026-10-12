@@ -45,7 +45,7 @@
 
 ## macOS에서 실행하기
 
-처음 한 번만 필요한 준비입니다. Python 3.11, Tkinter, FFmpeg가 필요하며, 설치 스크립트가 Homebrew를 사용해 빠진 항목을 자동으로 설치합니다. Homebrew가 없다면 [설치한 뒤](https://brew.sh) 이 스크립트를 실행하세요.
+처음 한 번만 필요한 준비입니다. Python 3.11, Tkinter, FFmpeg가 필요합니다. 설치 스크립트는 이미 설치된 Python 3.11+Tkinter를 우선 재사용하고, 없으면 프로젝트의 `.tools` 폴더에 사전 빌드 Python 3.11을 내려받아 만듭니다. Python과 Tkinter 때문에 Homebrew가 소스 컴파일을 시작하지 않습니다. FFmpeg 설치에만 Homebrew가 필요하므로, 없다면 [먼저 설치](https://brew.sh)해 주세요.
 
 터미널에서 프로젝트 최상위 폴더를 연 뒤 아래 순서대로 실행합니다.
 

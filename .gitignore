@@ -1,5 +1,6 @@
 # Local Python environment
 .venv/
+.tools/
 
 # Downloaded model weights are large and machine-local.
 models/*

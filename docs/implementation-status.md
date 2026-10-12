@@ -55,6 +55,8 @@ FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면
 
 macOS에서는 Small·Turbo 프로필을 CPU `int8`로 실행합니다. Windows·Linux는 CTranslate2 CUDA 실행 환경을 감지하면 GPU를 우선 사용합니다. Large-v3는 CUDA GPU가 필요하므로 macOS에서는 선택할 수 없습니다.
 
+macOS 설치 스크립트는 기존 Python 3.11+Tkinter를 재사용하고, 없는 경우 프로젝트 내부에 사전 빌드 Python 3.11을 내려받아 Homebrew의 긴 Python·Tkinter 소스 컴파일을 피합니다. Homebrew는 FFmpeg의 사전 빌드 bottle 설치에만 사용합니다.
+
 ## 긴 녹음 파일 검증 현황
 
 - 약 1시간 49분 길이의 M4A 녹음으로 실제 분석 흐름을 확인 중입니다.

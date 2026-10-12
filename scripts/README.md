@@ -1,6 +1,6 @@
 # 운영체제별 초기 설정 스크립트
 
-TalkTracker는 프로젝트 내부의 `.venv`와 `models/` 폴더만 사용합니다. 모델은 Hugging Face 공용 캐시에 의존하지 않으며, 내려받은 모델 파일은 Git에 포함되지 않습니다.
+TalkTracker는 프로젝트 내부의 `.venv`, `.tools`, `models/` 폴더를 사용합니다. 모델은 Hugging Face 공용 캐시에 의존하지 않으며, 내려받은 모델 파일은 Git에 포함되지 않습니다.
 
 Windows용 PowerShell 스크립트는 `scripts/windows`, macOS용 Bash 스크립트는 `scripts/macos`, Linux용 Bash 스크립트는 `scripts/linux`에 있습니다.
 
@@ -19,7 +19,7 @@ CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트�
 
 ## macOS
 
-프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`가 Homebrew로 Python 3.11, Tkinter, FFmpeg의 설치 여부를 확인하고, 빠진 항목만 자동 설치합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
+프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`는 설치된 Python 3.11+Tkinter를 재사용합니다. 없으면 프로젝트 내부 `.tools`에 사전 빌드 Python 3.11을 내려받으므로 Homebrew가 Python·Tkinter를 소스에서 컴파일하지 않습니다. Homebrew는 FFmpeg 설치에만 사용하며, 사전 빌드 bottle을 우선 요청합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
 
 ```bash
 bash scripts/macos/Install-Dependencies.sh
