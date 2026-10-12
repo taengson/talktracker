@@ -30,6 +30,8 @@ bash scripts/macos/Run-Gui.sh
 
 macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용할 수 있습니다. 최고 정확도(Large-v3)는 CUDA GPU가 필요해 macOS에서는 실행할 수 없습니다.
 
+Intel Mac과 Apple Silicon Mac 모두 PyTorch 2.2.2 CPU 실행 환경을 사용합니다. 최신 PyTorch는 Intel용 macOS 휠을 더 이상 제공하지 않아, 두 아키텍처에서 공통으로 동작하는 검증된 버전으로 고정했습니다.
+
 ## Linux
 
 프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. 설치 스크립트는 apt, dnf, pacman을 감지해 필요한 시스템 패키지를 설치하려고 합니다. 배포판에 Python 3.11 또는 FFmpeg 패키지가 없으면 배포판의 별도 저장소를 설정한 뒤 다시 실행하세요.

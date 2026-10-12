@@ -4,6 +4,8 @@
 
 > **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
+> **Intel Mac:** 설치 스크립트는 Intel·Apple Silicon 모두에서 사용할 수 있는 PyTorch 2.2.2를 설치합니다. macOS에서는 CPU 전사만 사용하므로 Apple GPU나 CUDA 설정은 필요하지 않습니다.
+
 ## 현재 가능한 기능
 
 - M4A, MP3, WAV, FLAC, AAC, OGG 음성 파일 선택

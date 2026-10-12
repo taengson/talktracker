@@ -93,6 +93,12 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+case "$(uname -m)" in
+  x86_64) echo "Detected an Intel Mac. Installing the compatible PyTorch runtime..." ;;
+  arm64) echo "Detected an Apple Silicon Mac. Installing the macOS CPU PyTorch runtime..." ;;
+  *) echo "Detected an unsupported macOS CPU architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
 if [[ ! -x "$python" ]]; then
   system_python="$(find_python311_with_tk || true)"
   if [[ -n "$system_python" ]]; then

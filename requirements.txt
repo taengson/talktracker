@@ -3,10 +3,12 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.14.1+cpu ; platform_system != "Darwin"
 torchaudio==2.11.0+cpu ; platform_system != "Darwin"
-# macOS wheels do not use the ``+cpu`` version suffix. TalkTracker currently
-# uses the CPU path on macOS, including Apple Silicon machines.
-torch==2.14.1 ; platform_system == "Darwin"
-torchaudio==2.11.0 ; platform_system == "Darwin"
+# PyTorch 2.2.2 is the latest release that still ships macOS Intel wheels.
+# It also runs on Apple Silicon and TalkTracker deliberately uses the CPU path
+# on macOS, so one compatible pair is more reliable than architecture-specific
+# latest releases.
+torch==2.2.2 ; platform_system == "Darwin"
+torchaudio==2.2.2 ; platform_system == "Darwin"
 numpy>=1.26,<3
 librosa>=0.10.2
 transformers
