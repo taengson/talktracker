@@ -203,7 +203,7 @@
               <div>
                 <h3>환경 검증</h3>
                 <p>현재 PC에서 두 모델을 실제로 불러오고, 1~5분 길이의 파일을 끝까지 처리할 수 있는지 먼저 확인합니다.</p>
-                <ul><li>Windows·Python·FFmpeg·PyTorch 및 CPU/GPU 상태 확인</li><li>Nemotron 다운로드와 Whisper Turbo 단독 실행 확인</li><li>CPU 및 NVIDIA GPU에서 처리 시간·메모리 기록</li></ul>
+                <ul><li>Windows·macOS·Linux, Python, FFmpeg, PyTorch 및 CPU/GPU 상태 확인</li><li>Nemotron 다운로드와 Whisper Turbo 단독 실행 확인</li><li>CPU 및 NVIDIA GPU에서 처리 시간·메모리 기록</li></ul>
                 <p class="done"><strong>완료 기준</strong> 하나의 로컬 WAV에서 전사와 화자 구간이 모두 생성된다.</p>
               </div>
             </article>
@@ -263,7 +263,7 @@
           <table>
             <thead><tr><th>위험</th><th>대응</th></tr></thead>
             <tbody>
-              <tr class="risk-high"><td><span class="risk-tag">우선</span>Windows에서 Nemotron 의존성 호환 문제</td><td>개발 시작 전 단계 0에서 실제 PC로 검증하고, Python/Transformers 경로를 우선 사용한다.</td></tr>
+              <tr class="risk-high"><td><span class="risk-tag">우선</span>운영체제별 Nemotron 의존성 호환 문제</td><td>개발 시작 전 단계 0에서 Windows·macOS·Linux 실제 환경을 검증하고, Python/Transformers 경로를 우선 사용한다.</td></tr>
               <tr class="risk-medium"><td><span class="risk-tag">주의</span>GPU가 없거나 VRAM 부족</td><td>CPU 모드를 제공하고 Turbo를 기본으로 한다. 필요하면 <code>medium</code>을 대안으로 둔다.</td></tr>
               <tr class="risk-medium"><td><span class="risk-tag">주의</span>동시 발화·잡음</td><td>겹침을 보존하고, 결과 화면에서 화자 라벨과 문장을 수정할 수 있게 한다.</td></tr>
               <tr class="risk-low"><td><span class="risk-tag">관리</span>화자 번호가 파일마다 달라짐</td><td>파일별 익명 라벨을 기본으로 하고 사용자가 이름을 붙이게 한다.</td></tr>

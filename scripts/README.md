@@ -1,52 +1,60 @@
-# Windows 초기 설정 스크립트
+# 운영체제별 초기 설정 스크립트
 
-현재는 Windows만 지원합니다. 이 폴더에는 앱을 실행하기 전에 한 번 준비하는 최소한의 스크립트만 둡니다. 모델 파일은 항상 프로젝트의 `models/` 폴더에 저장되며, Hugging Face 공용 캐시에 의존하지 않습니다.
+TalkTracker는 프로젝트 내부의 `.venv`와 `models/` 폴더만 사용합니다. 모델은 Hugging Face 공용 캐시에 의존하지 않으며, 내려받은 모델 파일은 Git에 포함되지 않습니다.
 
-먼저 PC에 Python 3.11을 설치한 뒤, 프로젝트 최상위 폴더에서 아래 순서대로 실행합니다.
+Windows용 PowerShell 스크립트는 `scripts/windows`, macOS용 Bash 스크립트는 `scripts/macos`, Linux용 Bash 스크립트는 `scripts/linux`에 있습니다.
 
-## 1. 앱 패키지 준비
+## Windows
+
+먼저 Python 3.11을 설치한 뒤, 프로젝트 최상위 폴더의 PowerShell에서 아래 순서대로 실행합니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-Dependencies.ps1
-```
-
-프로젝트 내부의 `.venv` 환경을 만들고 `requirements.txt`에 적힌 Python 패키지만 설치합니다. 음성 파일 변환에는 FFmpeg도 필요하며, 설치 스크립트는 FFmpeg가 없을 때 안내를 표시합니다.
-
-## 2. 모델 다운로드
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1
-```
-
-기본 실행은 권장 모델인 Whisper Large-v3 Turbo와 Nemotron을 `models/`에 저장합니다. 프로그램 화면에서 시작하면 다운로드 뒤 실행용 변환까지 하나의 작업으로 이어집니다. 스크립트에서 직접 지정할 수도 있습니다.
-
-```powershell
-# 빠른 전사
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile small
-
-# 권장 (기본값)
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile turbo
-
-# 최고 정확도: 호환 CUDA GPU 필요
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile large-v3
-```
-
-## 3. Whisper CPU 최적화 준비
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-FasterWhisper.ps1
-```
-
-선택한 Whisper 모델을 로컬 실행 형식으로 변환합니다. 기본 Turbo와 Small은 CPU `int8` 형식으로, Large-v3는 GPU `float16` 형식으로 준비됩니다. 첫 실행에만 필요합니다.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-FasterWhisper.ps1 -WhisperProfile small
-```
-
-## 4. 프로그램 실행
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Gui.ps1
 ```
 
-파일 선택, 분석 시작, 중단, 결과 저장 버튼을 사용할 수 있습니다. 분석 시작을 누르면 Nemotron 화자 분리와 선택한 Whisper 전사를 순차로 실행한 뒤 실제 결과를 표시합니다.
+CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. CTranslate2 GPU 실행에는 NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다.
+
+## macOS
+
+프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`가 Homebrew로 Python 3.11, Tkinter, FFmpeg의 설치 여부를 확인하고, 빠진 항목만 자동 설치합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
+
+```bash
+bash scripts/macos/Install-Dependencies.sh
+bash scripts/macos/Download-Models.sh
+bash scripts/macos/Prepare-FasterWhisper.sh
+bash scripts/macos/Run-Gui.sh
+```
+
+macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용할 수 있습니다. 최고 정확도(Large-v3)는 CUDA GPU가 필요해 macOS에서는 실행할 수 없습니다.
+
+## Linux
+
+프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. 설치 스크립트는 apt, dnf, pacman을 감지해 필요한 시스템 패키지를 설치하려고 합니다. 배포판에 Python 3.11 또는 FFmpeg 패키지가 없으면 배포판의 별도 저장소를 설정한 뒤 다시 실행하세요.
+
+```bash
+bash scripts/linux/Install-Dependencies.sh
+bash scripts/linux/Download-Models.sh
+bash scripts/linux/Prepare-FasterWhisper.sh
+bash scripts/linux/Run-Gui.sh
+```
+
+CUDA GPU 실행이 준비된 Linux 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다.
+
+실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.
+
+## 전사 품질 선택
+
+모델 다운로드와 준비 스크립트에는 같은 프로필을 지정합니다. 지정하지 않으면 권장 Turbo를 사용합니다.
+
+| 프로필 | Windows PowerShell 예시 | macOS Bash 예시 | Linux Bash 예시 |
+| --- | --- | --- | --- |
+| 빠른 전사 | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile small` | `bash scripts/macos/Download-Models.sh --whisper-profile small` | `bash scripts/linux/Download-Models.sh --whisper-profile small` |
+| 권장 | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile turbo` | `bash scripts/macos/Download-Models.sh --whisper-profile turbo` | `bash scripts/linux/Download-Models.sh --whisper-profile turbo` |
+| 최고 정확도 (CUDA GPU 필요) | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Download-Models.ps1 -WhisperProfile large-v3` | 다운로드는 가능하지만 macOS에서는 실행할 수 없음 | `bash scripts/linux/Download-Models.sh --whisper-profile large-v3` |
+
+파일 다운로드 후 실행 형식으로 바로 준비하려면 Windows에서는 `-PrepareForLocalUse`, macOS에서는 `--prepare-for-local-use`를 다운로드 명령 끝에 붙일 수 있습니다.
+
+Windows에서 모델 준비 대상을 직접 지정하려면 `Prepare-FasterWhisper.ps1`에 `-Runtime cpu`, `-Runtime cuda`, 또는 `-Runtime both`를 붙일 수 있습니다. Linux에서는 `Prepare-FasterWhisper.sh`에 `--runtime cpu`, `--runtime cuda`, 또는 `--runtime both`를 붙일 수 있습니다. 두 운영체제 모두 기본값 `auto`가 실제 CTranslate2 CUDA 실행 가능 여부를 확인해 적절한 모델을 준비합니다.

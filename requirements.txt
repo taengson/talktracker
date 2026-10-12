@@ -1,8 +1,12 @@
 # Local model runtime
-# The CPU index keeps this project usable on machines without a suitable NVIDIA GPU.
+# The CPU index keeps Windows/Linux installations usable without a suitable NVIDIA GPU.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.1+cpu
-torchaudio==2.11.0+cpu
+torch==2.14.1+cpu ; platform_system != "Darwin"
+torchaudio==2.11.0+cpu ; platform_system != "Darwin"
+# macOS wheels do not use the ``+cpu`` version suffix. TalkTracker currently
+# uses the CPU path on macOS, including Apple Silicon machines.
+torch==2.14.1 ; platform_system == "Darwin"
+torchaudio==2.11.0 ; platform_system == "Darwin"
 numpy>=1.26,<3
 transformers
 accelerate

@@ -1,15 +1,16 @@
 # TalkTracker
 
-로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 한 화면에서 정리하는 Windows용 데스크톱 프로그램입니다. 음성 파일과 분석 결과는 PC 밖으로 전송하지 않습니다.
+로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 한 화면에서 정리하는 Windows·macOS·Linux용 데스크톱 프로그램입니다. 음성 파일과 분석 결과는 PC 밖으로 전송하지 않습니다.
 
-> **운영체제 지원 범위:** 현재는 **Windows만 지원**합니다. 설치·모델 다운로드·실행을 위한 PowerShell 스크립트는 `scripts/windows`에만 제공하며, macOS와 Linux용 스크립트는 아직 제공하지 않습니다.
+> **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
 ## 현재 가능한 기능
 
 - M4A, MP3, WAV, FLAC, AAC, OGG 음성 파일 선택
 - Nemotron 기반 화자 구간 분리
 - 전사 목적에 따라 Whisper Small 또는 Large-v3 Turbo 선택
-- 호환 GPU가 있을 때 Whisper Large-v3 최고 정확도 모드 선택
+- 호환 CUDA GPU를 감지하면 Small·Turbo도 GPU `float16`으로 자동 전사하고, 사용할 수 없으면 CPU `int8`으로 자동 전환
+- 호환 CUDA GPU가 있을 때 Whisper Large-v3 최고 정확도 모드 선택
 - 화자별 타임라인을 전사 중에도 먼저 표시
 - 경과 시간과 진행 상태 표시
 - 분석 중단 시, 그 시점까지 완성된 화자 구간과 전사 결과 유지
@@ -22,6 +23,7 @@
 - 파일 선택부터 분석 시작·중단·결과 저장까지 데스크톱 화면에서 실행
 - Nemotron으로 화자별 구간을 먼저 찾고, 분석 도중에도 화자 타임라인을 표시
 - Whisper Small(빠른 확인), Large-v3 Turbo(권장), Large-v3(GPU 필요)를 선택해 전사
+- Windows와 Linux에서 CUDA GPU가 준비되면 GPU `float16`을 우선 사용하고, GPU 로드 실패 시 Small·Turbo는 CPU `int8`으로 자동 전환
 - 전사 중 경과 시간과 상태 문구를 표시해 긴 파일의 진행 여부를 확인
 - 분석을 중단하면 이미 완료된 화자 분리와 전사 결과만으로 화면 및 저장 결과 구성
 - 모델 가중치는 프로젝트의 `models/`에 보관하며, Git에는 포함하지 않음
@@ -39,6 +41,36 @@
 
 모델은 프로젝트의 `models` 폴더에 저장됩니다. 화면에서 전사 품질을 고르면 그 선택에 맞는 모델만 준비 메뉴에서 내려받아 사용할 수 있습니다.
 
+> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요하며, 준비되지 않은 환경은 자동으로 CPU `int8`을 사용합니다.
+
+## macOS에서 실행하기
+
+처음 한 번만 필요한 준비입니다. Python 3.11, Tkinter, FFmpeg가 필요하며, 설치 스크립트가 Homebrew를 사용해 빠진 항목을 자동으로 설치합니다. Homebrew가 없다면 [설치한 뒤](https://brew.sh) 이 스크립트를 실행하세요.
+
+터미널에서 프로젝트 최상위 폴더를 연 뒤 아래 순서대로 실행합니다.
+
+1. `bash scripts/macos/Install-Dependencies.sh`
+2. `bash scripts/macos/Download-Models.sh`
+3. `bash scripts/macos/Prepare-FasterWhisper.sh`
+4. 이후에는 `bash scripts/macos/Run-Gui.sh`
+
+모델은 Windows와 마찬가지로 프로젝트의 `models` 폴더에만 저장됩니다. macOS용 모델 준비와 실행은 CPU `int8` 설정을 사용합니다.
+
+## Linux에서 실행하기
+
+Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3.11, Tkinter, FFmpeg 설치를 안내하거나 시도합니다. 배포판에 따라 Python 3.11이나 FFmpeg 패키지가 별도 저장소에 있을 수 있으며, 이 경우 스크립트의 안내에 따라 해당 저장소를 먼저 설정해 주세요.
+
+터미널에서 프로젝트 최상위 폴더를 연 뒤 아래 순서대로 실행합니다.
+
+1. `bash scripts/linux/Install-Dependencies.sh`
+2. `bash scripts/linux/Download-Models.sh`
+3. `bash scripts/linux/Prepare-FasterWhisper.sh`
+4. 이후에는 `bash scripts/linux/Run-Gui.sh`
+
+CUDA GPU 실행이 가능한 Linux 환경에서는 Small·Turbo가 GPU `float16`으로 실행되고, GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환됩니다.
+
+실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
+
 ## 처리 순서
 
 1. 음성 파일을 분석용 형식으로 정리합니다.
@@ -52,4 +84,5 @@
 
 - [개발 계획서](docs/development-plan.md)
 - [현재 구현 상태와 검증 메모](docs/implementation-status.md)
+- [Linux 검증 가이드](docs/linux-test-guide.md)
 - [스크립트 안내](scripts/README.md)

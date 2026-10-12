@@ -1,9 +1,12 @@
-"""Windows desktop GUI for TalkTracker's local sequential audio pipeline."""
+"""Desktop GUI for TalkTracker's local sequential audio pipeline."""
 
 from __future__ import annotations
 
 import tkinter as tk
+import shlex
+import shutil
 import subprocess
+import sys
 import time
 from queue import Empty, Queue
 from threading import Event, Thread
@@ -11,7 +14,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from tkinter import filedialog, messagebox, ttk
 
-from .core.models import WHISPER_PROFILES, WhisperProfile, get_whisper_profile
+from .core.models import (
+    WHISPER_PROFILES,
+    WhisperProfile,
+    cuda_available,
+    get_whisper_profile,
+    get_whisper_runtime,
+)
 
 if TYPE_CHECKING:
     from .core import AnalysisResult
@@ -19,10 +28,18 @@ if TYPE_CHECKING:
 
 WINDOW_TITLE = "TalkTracker"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DOWNLOAD_SCRIPT = PROJECT_ROOT / "scripts" / "windows" / "Download-Models.ps1"
-PREPARE_WHISPER_SCRIPT = PROJECT_ROOT / "scripts" / "windows" / "Prepare-FasterWhisper.ps1"
-INSTALL_SCRIPT = PROJECT_ROOT / "scripts" / "windows" / "Install-Dependencies.ps1"
-HUGGING_FACE_CLI = PROJECT_ROOT / ".venv" / "Scripts" / "hf.exe"
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+SETUP_PLATFORM_NAME = "Windows" if IS_WINDOWS else "macOS" if IS_MACOS else "Linux" if IS_LINUX else sys.platform
+SETUP_SCRIPT_PLATFORM = "windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux" if IS_LINUX else None
+SETUP_SCRIPT_DIRECTORY = PROJECT_ROOT / "scripts" / (SETUP_SCRIPT_PLATFORM or "unsupported")
+DOWNLOAD_SCRIPT = SETUP_SCRIPT_DIRECTORY / ("Download-Models.ps1" if IS_WINDOWS else "Download-Models.sh")
+PREPARE_WHISPER_SCRIPT = SETUP_SCRIPT_DIRECTORY / (
+    "Prepare-FasterWhisper.ps1" if IS_WINDOWS else "Prepare-FasterWhisper.sh"
+)
+INSTALL_SCRIPT = SETUP_SCRIPT_DIRECTORY / ("Install-Dependencies.ps1" if IS_WINDOWS else "Install-Dependencies.sh")
+HUGGING_FACE_CLI = PROJECT_ROOT / ".venv" / ("Scripts/hf.exe" if IS_WINDOWS else "bin/hf")
 SUPPORTED_FILE_TYPES = [
     ("지원되는 음성 파일", "*.m4a *.mp3 *.wav *.flac *.aac *.ogg"),
     ("모든 파일", "*.*"),
@@ -237,23 +254,23 @@ class TalkTrackerApp(tk.Tk):
         return get_whisper_profile(self.whisper_profile_key.get())
 
     def _whisper_model_label(self) -> str:
-        return f"{self.selected_whisper_profile.short_label} Whisper 전사"
+        profile = self.selected_whisper_profile
+        runtime = get_whisper_runtime(profile)
+        runtime_label = runtime.label if runtime else "CUDA GPU 필요"
+        return f"{profile.short_label} Whisper 전사 · {runtime_label}"
 
     def _model_locations(self) -> dict[str, tuple[Path, str]]:
         profile = self.selected_whisper_profile
+        runtime = get_whisper_runtime(profile)
+        runtime_folder = runtime.folder if runtime else profile.cuda_runtime_folder
         return {
-            self._whisper_model_label(): (PROJECT_ROOT / "models" / profile.runtime_folder, "model.bin"),
+            self._whisper_model_label(): (PROJECT_ROOT / "models" / runtime_folder, "model.bin"),
             "Nemotron 화자 분리": (PROJECT_ROOT / "models" / "nemotron-3-diarization", "model.safetensors"),
         }
 
     @staticmethod
     def _gpu_available() -> bool:
-        try:
-            import torch
-
-            return bool(torch.cuda.is_available())
-        except (ImportError, OSError):
-            return False
+        return cuda_available()
 
     def refresh_model_status(self) -> None:
         """Reflect whether the selected local transcription profile is ready to load."""
@@ -295,7 +312,7 @@ class TalkTrackerApp(tk.Tk):
         tk.Label(header, text="로컬 모델 관리", bg=self.GROUND, fg=self.NAVY, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         explanation = (
             "TalkTracker는 프로젝트 안의 models 폴더에서만 모델을 찾습니다.\n"
-            "모델이 없으면 아래 버튼으로 Windows 다운로드 스크립트를 실행할 수 있습니다."
+            f"모델이 없으면 아래 버튼으로 {SETUP_PLATFORM_NAME} 다운로드 스크립트를 실행할 수 있습니다."
         )
         tk.Label(header, text=explanation, bg=self.GROUND, fg=self.MUTED, font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(5, 0))
 
@@ -370,17 +387,45 @@ class TalkTrackerApp(tk.Tk):
         self.refresh_model_status()
         self.open_model_manager()
 
-    def _start_windows_script(self, script: Path, description: str, arguments: list[str] | None = None) -> bool:
+    def _start_setup_script(self, script: Path, description: str, arguments: list[str] | None = None) -> bool:
         if self.model_setup_in_progress:
             messagebox.showinfo(WINDOW_TITLE, "모델 준비 작업이 이미 실행 중입니다.\n완료된 뒤 ‘상태 새로고침’을 눌러 주세요.")
             return False
         if not script.is_file():
             messagebox.showerror(WINDOW_TITLE, f"실행 스크립트를 찾지 못했습니다.\n\n{script}")
             return False
-        try:
+        if IS_WINDOWS:
             command = ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", str(script)]
             if arguments:
                 command.extend(arguments)
+        elif IS_MACOS:
+            shell_command = " ".join(shlex.quote(part) for part in ["bash", str(script), *(arguments or [])])
+            terminal_command = f"cd {shlex.quote(str(PROJECT_ROOT))}; {shell_command}"
+            applescript_command = terminal_command.replace("\\", "\\\\").replace('"', '\\"')
+            command = ["osascript", "-e", f'tell application "Terminal" to do script "{applescript_command}"']
+        elif IS_LINUX:
+            shell_command = " ".join(shlex.quote(part) for part in ["bash", str(script), *(arguments or [])])
+            terminal_command = (
+                f"cd {shlex.quote(str(PROJECT_ROOT))}; {shell_command}; status=$?; "
+                'printf "\\nTalkTracker setup finished with exit code: %s\\n" "$status"; '
+                'exec "${SHELL:-/bin/bash}" -l'
+            )
+            command = self._linux_terminal_command(terminal_command)
+            if not command:
+                messagebox.showerror(
+                    WINDOW_TITLE,
+                    "Linux 터미널 프로그램을 찾지 못했습니다.\n\n"
+                    f"터미널에서 다음 명령을 직접 실행해 주세요.\n\n{shell_command}",
+                )
+                return False
+        else:
+            messagebox.showerror(
+                WINDOW_TITLE,
+                f"{SETUP_PLATFORM_NAME}에서는 아직 모델 준비 스크립트를 지원하지 않습니다.",
+            )
+            return False
+
+        try:
             subprocess.Popen(
                 command,
                 cwd=PROJECT_ROOT,
@@ -392,11 +437,28 @@ class TalkTrackerApp(tk.Tk):
         self.model_setup_in_progress = True
         messagebox.showinfo(
             WINDOW_TITLE,
-            f"{description} 창을 열었습니다.\n\n"
-            "별도로 열린 창에 Done 메시지가 나올 때까지 기다려 주세요.\n"
+            f"{description} {SETUP_PLATFORM_NAME} 터미널 창을 열었습니다.\n\n"
+            "별도로 열린 창에 완료 메시지가 나올 때까지 기다려 주세요.\n"
             "이 모델 관리 창은 닫지 말고, 완료된 뒤 ‘상태 새로고침’을 눌러 주세요.",
         )
         return True
+
+    @staticmethod
+    def _linux_terminal_command(command: str) -> list[str] | None:
+        """Return a command for a common Linux desktop terminal, if one is installed."""
+
+        terminal_variants = (
+            ("gnome-terminal", ["--", "bash", "-lc", command]),
+            ("kgx", ["--", "bash", "-lc", command]),
+            ("konsole", ["-e", "bash", "-lc", command]),
+            ("xterm", ["-e", "bash", "-lc", command]),
+            ("x-terminal-emulator", ["-e", "bash", "-lc", command]),
+        )
+        for executable, arguments in terminal_variants:
+            path = shutil.which(executable)
+            if path:
+                return [path, *arguments]
+        return None
 
     def start_model_download(self, dialog: tk.Toplevel) -> None:
         profile = self.selected_whisper_profile
@@ -409,13 +471,17 @@ class TalkTrackerApp(tk.Tk):
             f"{download_message}\n저장 공간과 인터넷 연결이 필요하며, 몇 분 정도 걸릴 수 있습니다.\n\n계속할까요?",
         ):
             return
-        arguments = ["-WhisperProfile", profile.key, "-PrepareForLocalUse"]
+        arguments = ["-WhisperProfile", profile.key, "-PrepareForLocalUse"] if IS_WINDOWS else [
+            "--whisper-profile",
+            profile.key,
+            "--prepare-for-local-use",
+        ]
         if nemotron_weights.is_file():
-            arguments.append("-SkipDiarization")
-        self._start_windows_script(DOWNLOAD_SCRIPT, "모델 다운로드 및 준비", arguments)
+            arguments.append("-SkipDiarization" if IS_WINDOWS else "--skip-diarization")
+        self._start_setup_script(DOWNLOAD_SCRIPT, "모델 다운로드 및 준비", arguments)
 
     def start_package_install(self, dialog: tk.Toplevel) -> None:
-        self._start_windows_script(INSTALL_SCRIPT, "앱 패키지 준비")
+        self._start_setup_script(INSTALL_SCRIPT, "앱 패키지 준비")
 
     def start_whisper_prepare(self, dialog: tk.Toplevel) -> None:
         profile = self.selected_whisper_profile
@@ -424,7 +490,8 @@ class TalkTrackerApp(tk.Tk):
             f"{profile.label} 모델을 로컬 실행용 형식으로 준비합니다.\n추가 저장 공간이 필요하며, 몇 분 정도 걸릴 수 있습니다.\n\n계속할까요?",
         ):
             return
-        self._start_windows_script(PREPARE_WHISPER_SCRIPT, "선택 모델 준비", ["-WhisperProfile", profile.key])
+        arguments = ["-WhisperProfile", profile.key] if IS_WINDOWS else ["--whisper-profile", profile.key]
+        self._start_setup_script(PREPARE_WHISPER_SCRIPT, "선택 모델 준비", arguments)
 
     def _build_hero(self, parent: tk.Misc) -> None:
         hero = tk.Frame(parent, bg=self.NAVY, padx=32, pady=25)

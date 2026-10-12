@@ -6,7 +6,7 @@
 
 ### 데스크톱 화면
 
-- Python/Tkinter 기반 Windows 데스크톱 화면
+- Python/Tkinter 기반 Windows·macOS·Linux 데스크톱 화면
 - 음성 파일 선택, 분석 시작, 중단, 선택 취소 버튼
 - 로컬 모델 준비 상태 표시 및 모델 준비 메뉴
 - 분석 단계와 경과 시간 표시
@@ -18,7 +18,7 @@
 
 1. FFmpeg로 입력 파일을 16 kHz 모노 WAV로 정리합니다.
 2. `nvidia/Nemotron-3-Diarization`으로 화자별 발화 구간을 분석합니다.
-3. 사용자가 고른 Whisper 모델을 CTranslate2 형식으로 변환한 뒤 전사합니다. Small과 Turbo는 CPU `int8`, Large-v3는 GPU `float16`을 사용합니다.
+3. 사용자가 고른 Whisper 모델을 CTranslate2 형식으로 변환한 뒤 전사합니다. Windows·Linux에서 CUDA GPU가 준비되면 Small·Turbo는 GPU `float16`을 우선 사용하고, 그렇지 않으면 CPU `int8`을 사용합니다. GPU 로드가 실패하면 Small·Turbo는 CPU로 자동 전환합니다. Large-v3는 CUDA GPU `float16` 전용입니다.
 4. 전사 구간과 화자 구간의 시간대를 겹쳐 화자별 대화 기록으로 만듭니다.
 
 ## 모델과 저장 위치
@@ -30,27 +30,30 @@
 | 화자 분리 | `models/nemotron-3-diarization` | Nemotron 원본 모델 |
 | 원본 전사 모델 | `models/whisper-large-v3-turbo` | Hugging Face 형식 |
 | CPU 전사용 모델 | `models/whisper-large-v3-turbo-ct2` | faster-whisper/CTranslate2 `int8` 형식 |
+| CUDA GPU 전사용 모델 | `models/whisper-large-v3-turbo-ct2-cuda-fp16` | faster-whisper/CTranslate2 `float16` 형식 |
 
 ## 전사 품질 선택
 
 | 화면 선택 | 모델 | 실행 조건 |
 | --- | --- | --- |
-| 빠른 전사 | `openai/whisper-small` | CPU 사용 가능 |
-| 권장 | `openai/whisper-large-v3-turbo` | CPU 사용 가능 · 기본값 |
+| 빠른 전사 | `openai/whisper-small` | CUDA GPU 우선 · CPU 대체 가능 |
+| 권장 | `openai/whisper-large-v3-turbo` | CUDA GPU 우선 · CPU 대체 가능 · 기본값 |
 | 최고 정확도 | `openai/whisper-large-v3` | 호환 CUDA GPU 필요 |
 
-선택한 모델만 다운로드·변환합니다. 결과 Markdown에는 사용한 전사 모델도 함께 기록합니다.
+선택한 원본 전사 모델만 다운로드합니다. CUDA GPU가 준비된 Windows·Linux에서는 해당 모델의 GPU 실행본과 CPU 대체 실행본을 함께 변환합니다. 결과 Markdown에는 실제 사용한 전사 모델과 실행 환경을 기록합니다.
 
-## Windows 준비 및 실행
+## Windows·macOS·Linux 준비 및 실행
 
 | 작업 | 스크립트 |
 | --- | --- |
-| 가상 환경 및 패키지 설치 | `scripts/windows/Install-Dependencies.ps1` |
-| 원본 모델 다운로드 | `scripts/windows/Download-Models.ps1` |
-| CPU 전사용 Whisper 모델 준비 | `scripts/windows/Prepare-FasterWhisper.ps1` |
-| 프로그램 실행 | `scripts/windows/Run-Gui.ps1` |
+| 가상 환경 및 패키지 설치 | Windows: `scripts/windows/Install-Dependencies.ps1` · macOS: `scripts/macos/Install-Dependencies.sh` · Linux: `scripts/linux/Install-Dependencies.sh` |
+| 원본 모델 다운로드 | Windows: `scripts/windows/Download-Models.ps1` · macOS: `scripts/macos/Download-Models.sh` · Linux: `scripts/linux/Download-Models.sh` |
+| Whisper 모델 준비 | Windows: `scripts/windows/Prepare-FasterWhisper.ps1` · macOS: `scripts/macos/Prepare-FasterWhisper.sh` · Linux: `scripts/linux/Prepare-FasterWhisper.sh` |
+| 프로그램 실행 | Windows: `scripts/windows/Run-Gui.ps1` · macOS: `scripts/macos/Run-Gui.sh` · Linux: `scripts/linux/Run-Gui.sh` |
 
-FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면 준비 스크립트가 안내를 표시합니다.
+FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면 준비 스크립트가 안내를 표시합니다. Windows·Linux에서 CUDA GPU 전사를 사용하려면 NVIDIA 드라이버, CUDA 12.x, cuDNN 8이 필요합니다. 조건을 충족하지 않거나 GPU 모델 로드에 실패하면 Small·Turbo는 CPU `int8`으로 실행합니다.
+
+macOS에서는 Small·Turbo 프로필을 CPU `int8`로 실행합니다. Windows·Linux는 CTranslate2 CUDA 실행 환경을 감지하면 GPU를 우선 사용합니다. Large-v3는 CUDA GPU가 필요하므로 macOS에서는 선택할 수 없습니다.
 
 ## 긴 녹음 파일 검증 현황
 
@@ -68,6 +71,8 @@ FFmpeg는 음성 형식 변환에 필요합니다. 설치되어 있지 않으면
 
 ## 다음 검증 항목
 
+- [Linux 검증 가이드](linux-test-guide.md)에 따른 Ubuntu·Debian·Fedora·Arch 계열의 설치 및 GUI 실행 확인
+- Linux CPU 전사와 NVIDIA CUDA GPU 전사의 실제 처리 시간·CPU/VRAM 사용량 기록
 - 긴 M4A 파일 전체 처리 시간 측정
 - 화자 수와 화자 구간의 품질 확인
 - Whisper 전사문과 화자 매칭의 자연스러움 확인

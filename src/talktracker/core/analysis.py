@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-from .models import WhisperProfile, get_whisper_profile
+from .models import WhisperProfile, WhisperRuntime, get_cpu_runtime, get_whisper_profile, get_whisper_runtime
 
 
 SAMPLE_RATE = 16_000
@@ -103,7 +103,7 @@ class AnalysisEngine:
     def __init__(self, project_root: Path, whisper_profile: str = "turbo") -> None:
         self.project_root = project_root
         self.whisper_profile: WhisperProfile = get_whisper_profile(whisper_profile)
-        self.whisper_dir = project_root / "models" / self.whisper_profile.runtime_folder
+        self.whisper_runtime: WhisperRuntime | None = get_whisper_runtime(self.whisper_profile)
         self.nemotron_dir = project_root / "models" / "nemotron-3-diarization"
 
     def analyze(
@@ -138,7 +138,7 @@ class AnalysisEngine:
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
 
             self._notify(progress, 52, "음성을 전사하고 있습니다…")
-            transcript_chunks, cancelled = self._transcribe(normalized, should_cancel)
+            transcript_chunks, cancelled = self._transcribe(normalized, should_cancel, progress)
             self._release_memory()
             if cancelled or self._cancelled(should_cancel):
                 return self._partial_result(source, duration, speaker_segments, transcript_chunks)
@@ -151,14 +151,23 @@ class AnalysisEngine:
             duration=duration,
             speaker_segments=speaker_segments,
             utterances=utterances,
-            whisper_profile=self.whisper_profile.label,
+            whisper_profile=self._whisper_result_label(),
         )
 
     def _ensure_models(self) -> None:
+        if not self.whisper_runtime:
+            raise ProcessingError(
+                "Whisper Large-v3는 호환 CUDA GPU가 필요합니다. "
+                "현재 PC에서는 ‘권장’ 또는 ‘빠른 전사’를 선택해 주세요."
+            )
         missing = [
             name
             for name, directory, weight_file in (
-                (f"{self.whisper_profile.short_label} Whisper 모델", self.whisper_dir, "model.bin"),
+                (
+                    f"{self.whisper_profile.short_label} Whisper 모델 ({self.whisper_runtime.label})",
+                    self.project_root / "models" / self.whisper_runtime.folder,
+                    "model.bin",
+                ),
                 ("Nemotron", self.nemotron_dir, "model.safetensors"),
             )
             if not (directory / weight_file).is_file()
@@ -247,27 +256,33 @@ class AnalysisEngine:
         self,
         normalized_audio: Path,
         should_cancel: CancelCallback | None,
+        progress: ProgressCallback | None,
     ) -> tuple[list[TranscriptChunk], bool]:
         try:
             from faster_whisper import WhisperModel
         except ModuleNotFoundError as error:
             raise ProcessingError("faster-whisper가 준비되지 않았습니다. 패키지 준비 스크립트를 다시 실행해 주세요.") from error
 
-        model_options: dict[str, Any] = {
-            "device": "cuda" if self.whisper_profile.requires_gpu else "cpu",
-            "compute_type": self.whisper_profile.compute_type,
-        }
-        if not self.whisper_profile.requires_gpu:
-            model_options.update(cpu_threads=6, num_workers=1)
+        if not self.whisper_runtime:
+            raise ProcessingError("전사 실행 환경을 선택하지 못했습니다.")
+
         try:
-            model = WhisperModel(str(self.whisper_dir), **model_options)
-        except RuntimeError as error:
-            if self.whisper_profile.requires_gpu:
-                raise ProcessingError(
-                    "Whisper Large-v3는 호환 CUDA GPU가 필요합니다. "
-                    "현재 PC에서는 ‘권장’ 또는 ‘빠른 전사’를 선택해 주세요."
-                ) from error
-            raise
+            model = self._load_whisper_model(WhisperModel, self.whisper_runtime)
+        except (OSError, RuntimeError, ValueError) as error:
+            model = self._load_cpu_fallback(WhisperModel, error, progress)
+
+        try:
+            return self._collect_transcript(model, normalized_audio, should_cancel)
+        except (OSError, RuntimeError, ValueError) as error:
+            cpu_model = self._load_cpu_fallback(WhisperModel, error, progress)
+            return self._collect_transcript(cpu_model, normalized_audio, should_cancel)
+
+    def _collect_transcript(
+        self,
+        model: Any,
+        normalized_audio: Path,
+        should_cancel: CancelCallback | None,
+    ) -> tuple[list[TranscriptChunk], bool]:
         segments, _info = model.transcribe(
             str(normalized_audio),
             beam_size=5,
@@ -292,6 +307,53 @@ class AnalysisEngine:
             if text:
                 chunks.append(TranscriptChunk(start=float(segment.start), end=float(segment.end), text=text))
         return chunks, False
+
+    def _load_whisper_model(self, whisper_model: Any, runtime: WhisperRuntime) -> Any:
+        model_options: dict[str, Any] = {
+            "device": runtime.device,
+            "compute_type": runtime.compute_type,
+        }
+        if not runtime.is_cuda:
+            model_options.update(cpu_threads=6, num_workers=1)
+        return whisper_model(str(self.project_root / "models" / runtime.folder), **model_options)
+
+    def _load_cpu_fallback(
+        self,
+        whisper_model: Any,
+        gpu_error: Exception,
+        progress: ProgressCallback | None,
+    ) -> Any:
+        """Retry on CPU when CUDA cannot load the model, such as after a VRAM error."""
+
+        if not self.whisper_runtime or not self.whisper_runtime.is_cuda:
+            raise gpu_error
+
+        cpu_runtime = get_cpu_runtime(self.whisper_profile)
+        if not cpu_runtime:
+            raise ProcessingError(
+                "Whisper Large-v3의 CUDA GPU 실행을 시작하지 못했습니다. "
+                "GPU 드라이버와 CUDA 환경을 확인해 주세요."
+            ) from gpu_error
+
+        cpu_model = self.project_root / "models" / cpu_runtime.folder / "model.bin"
+        if not cpu_model.is_file():
+            raise ProcessingError(
+                "CUDA GPU 전사를 시작하지 못했고 CPU 대체 모델도 준비되지 않았습니다. "
+                "로컬 모델 관리에서 선택 모델을 다시 준비해 주세요."
+            ) from gpu_error
+
+        self._notify(progress, 54, "CUDA GPU를 사용할 수 없어 CPU 전사로 전환하고 있습니다…")
+        try:
+            model = self._load_whisper_model(whisper_model, cpu_runtime)
+        except (OSError, RuntimeError, ValueError) as cpu_error:
+            raise ProcessingError("CPU 대체 전사 모델도 시작하지 못했습니다.") from cpu_error
+        self.whisper_runtime = cpu_runtime
+        return model
+
+    def _whisper_result_label(self) -> str:
+        if not self.whisper_runtime:
+            return self.whisper_profile.label
+        return f"{self.whisper_profile.label} · {self.whisper_runtime.label}"
 
     def _merge_speakers_and_text(
         self,
@@ -358,7 +420,7 @@ class AnalysisEngine:
             duration=duration,
             speaker_segments=speaker_segments,
             utterances=self._merge_speakers_and_text(speaker_segments, transcript_chunks),
-            whisper_profile=self.whisper_profile.label,
+            whisper_profile=self._whisper_result_label(),
             is_partial=True,
         )
 

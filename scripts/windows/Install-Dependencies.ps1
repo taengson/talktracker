@@ -41,6 +41,24 @@ if ($LASTEXITCODE -ne 0) {
     throw 'TalkTracker 패키지 설치에 실패했습니다.'
 }
 
+$CudaProbe = @'
+import sys
+try:
+    import ctranslate2
+    has_cuda = ctranslate2.get_cuda_device_count() > 0
+    supports_fp16 = "float16" in ctranslate2.get_supported_compute_types("cuda")
+    sys.exit(0 if has_cuda and supports_fp16 else 1)
+except Exception:
+    sys.exit(1)
+'@
+& $Python -c $CudaProbe
+$CudaReady = $LASTEXITCODE -eq 0
+if ($CudaReady) {
+    Write-Host 'CUDA GPU Whisper 실행 환경을 확인했습니다. 모델 준비 시 GPU FP16 모델도 함께 만듭니다.' -ForegroundColor Cyan
+} elseif (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    Write-Warning 'NVIDIA GPU는 감지했지만 CTranslate2 CUDA 실행 환경은 준비되지 않았습니다. GPU 전사를 쓰려면 CUDA 12.x와 cuDNN 8을 설치한 뒤 다시 실행해 주세요. 그전에는 CPU INT8로 동작합니다.'
+}
+
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
     Write-Warning 'FFmpeg를 찾지 못했습니다. 음성 파일 처리를 위해 FFmpeg를 설치하고 PATH에 추가해 주세요.'
 }

@@ -1,7 +1,15 @@
 """Local audio-processing pipeline for TalkTracker."""
 
 from .analysis import AnalysisEngine, AnalysisResult, ProcessingError
-from .models import WHISPER_PROFILES, WhisperProfile, get_whisper_profile
+from .models import (
+    WHISPER_PROFILES,
+    WhisperProfile,
+    WhisperRuntime,
+    cuda_available,
+    get_cpu_runtime,
+    get_whisper_profile,
+    get_whisper_runtime,
+)
 
 __all__ = [
     "AnalysisEngine",
@@ -9,5 +17,9 @@ __all__ = [
     "ProcessingError",
     "WHISPER_PROFILES",
     "WhisperProfile",
+    "WhisperRuntime",
+    "cuda_available",
+    "get_cpu_runtime",
     "get_whisper_profile",
+    "get_whisper_runtime",
 ]
