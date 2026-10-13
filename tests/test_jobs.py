@@ -6,11 +6,12 @@ import unittest
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from talktracker.core.jobs import JobManager
-from talktracker.server import _index_page, create_app
+from talktracker.server import _index_page, create_app, main as server_main
 
 
 class FakeResult:
@@ -120,6 +121,12 @@ class ServerPageTests(unittest.TestCase):
         self.assertNotIn('"\\\\\"":"&quot;"', page)
         self.assertIn('request("/api/profiles")', page)
         self.assertIn('event.preventDefault()', page)
+        self.assertIn('function renderTimeline(segments, durationSeconds)', page)
+        self.assertIn('class="speaker-lane"', page)
+        self.assertNotIn('id="token"', page)
+        protected_page = _index_page(access_token_required=True)
+        self.assertIn('id="token"', protected_page)
+        self.assertIn('refreshProtectedData', protected_page)
 
     def test_server_disables_missing_models_and_rejects_their_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -136,6 +143,18 @@ class ServerPageTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 409)
                 self.assertIn("Whisper 모델이 준비되지 않았습니다", response.json()["detail"])
+
+    def test_internal_network_mode_can_start_without_an_access_token(self) -> None:
+        uvicorn_run = Mock()
+        with (
+            patch("talktracker.server.create_app", return_value=object()),
+            patch("sys.argv", ["talktracker.server", "--host", "0.0.0.0"]),
+            patch.dict("os.environ", {"TALKTRACKER_WEB_TOKEN": ""}, clear=False),
+            patch.dict("sys.modules", {"uvicorn": SimpleNamespace(run=uvicorn_run)}),
+        ):
+            server_main()
+
+        self.assertEqual(uvicorn_run.call_args.kwargs["host"], "0.0.0.0")
 
 
 if __name__ == "__main__":

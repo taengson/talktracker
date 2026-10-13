@@ -63,7 +63,13 @@ bash scripts/linux/Run-Web.sh
 ssh -L 8080:127.0.0.1:8080 user@remote-host
 ```
 
-로컬 네트워크에서 직접 접속하게 하려면 토큰을 설정하고 `--host 0.0.0.0`을 지정합니다. 외부 인터넷에 직접 공개하지 마세요.
+신뢰할 수 있는 내부 네트워크에서 직접 접속하게 하려면 `--host 0.0.0.0`을 지정합니다. 이 경우 토큰은 필요하지 않습니다. 외부 인터넷에 직접 공개하지 마세요.
+
+```bash
+bash scripts/linux/Run-Web.sh --host 0.0.0.0
+```
+
+내부망 사용자도 제한해야 한다면 `TALKTRACKER_WEB_TOKEN`을 설정합니다. 이 경우에만 웹 화면에 접근 토큰 입력란이 표시됩니다.
 
 ```bash
 TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \

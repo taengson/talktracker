@@ -108,10 +108,10 @@ def _profile_payload(project_root: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _index_page() -> str:
+def _index_page(*, access_token_required: bool = False) -> str:
     """Keep the initial client self-contained; no frontend build is required."""
 
-    return """<!doctype html>
+    page = """<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
@@ -131,9 +131,9 @@ def _index_page() -> str:
     .hint { color:var(--muted); font-size:13px; } .notice { padding:10px 12px; border-radius:8px; background:var(--mint); color:#1e6655; } .error { color:var(--danger); background:#fbecec; }
     .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; }
     dl { display:grid; grid-template-columns:126px 1fr; gap:6px 14px; margin:16px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
-    .timeline { display:flex; flex-wrap:wrap; gap:5px; margin-top:14px; } .turn { padding:3px 7px; border-radius:999px; color:#18564e; background:#e2f2ee; font-size:12px; }
+    .timeline { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f9fbfa; overflow-x:auto; } .timeline-title { margin:0 0 9px; font-size:13px; font-weight:750; } .timeline-scale { display:flex; justify-content:space-between; margin:0 3px 5px 88px; color:var(--muted); font-size:11px; } .speaker-lane { display:grid; grid-template-columns:76px minmax(420px, 1fr); gap:10px; align-items:center; min-width:560px; margin:5px 0; } .speaker-label { overflow:hidden; color:var(--muted); font-size:12px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .speaker-track { position:relative; height:14px; border-radius:4px; background:repeating-linear-gradient(90deg,#e8efed 0,#e8efed calc(10% - 1px),#dfe9e6 calc(10% - 1px),#dfe9e6 10%); } .speaker-turn { position:absolute; top:2px; height:10px; min-width:2px; border-radius:3px; box-shadow:0 1px 1px rgb(16 54 64 / 18%); } .timeline-empty { color:var(--muted); font-size:13px; }
     a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; }
-    @media (max-width:620px) { .grid { grid-template-columns:1fr; } dl { grid-template-columns:1fr; gap:1px; } dt { margin-top:8px; } }
+    @media (max-width:620px) { .grid { grid-template-columns:1fr; } dl { grid-template-columns:1fr; gap:1px; } dt { margin-top:8px; } .timeline { padding:11px; } }
   </style>
 </head>
 <body>
@@ -145,7 +145,7 @@ def _index_page() -> str:
     <form id="upload-form">
       <div class="grid"><div><label for="audio">음성 파일</label><input id="audio" name="file" type="file" accept=".m4a,.mp3,.wav,.flac,.aac,.ogg" required></div>
       <div><label for="profile">전사 품질</label><select id="profile" name="profile" disabled></select><p id="profile-status" class="hint">서버의 준비된 모델을 확인하고 있습니다…</p></div></div>
-      <label for="token">접근 토큰 <span class="hint">(SSH 터널 접속이면 비워 둡니다)</span></label><input id="token" type="password" autocomplete="off" placeholder="서버에서 토큰을 설정한 경우 입력">
+      __ACCESS_TOKEN_SECTION__
       <div class="actions"><button id="submit" type="submit" disabled>업로드하고 분석 시작</button><span id="upload-status" class="hint"></span></div>
     </form>
   </section>
@@ -159,7 +159,7 @@ def _index_page() -> str:
   let activeId = null, events = null, polling = null, profiles = [];
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
-  const token = () => $("token").value.trim();
+  const token = () => $("token")?.value.trim() || "";
   const authHeaders = () => token() ? {"X-TalkTracker-Token": token()} : {};
   const apiUrl = (path, includeToken = false) => includeToken && token() ? `${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(token())}` : path;
   async function request(path, options = {}) {
@@ -173,10 +173,30 @@ def _index_page() -> str:
     activeId = job.id; $("current").classList.remove("hidden"); $("current-notice").textContent = job.error || job.message; $("current-notice").classList.toggle("error", job.state === "failed");
     $("progress-bar").style.width = `${job.progress}%`;
     $("details").innerHTML = `<dt>파일</dt><dd>${escapeHtml(job.source_name)}</dd><dt>상태</dt><dd>${escapeHtml(job.state)}${job.queue_position ? ` · 대기 ${job.queue_position}번` : ""}</dd><dt>전사 품질</dt><dd>${escapeHtml(job.whisper_profile)}</dd><dt>진행률</dt><dd>${job.progress}%</dd><dt>녹음 길이</dt><dd>${duration(job.duration_seconds)}</dd>`;
-    $("timeline").innerHTML = (job.speaker_segments || []).slice(0, 32).map((turn) => `<span class="turn">${escapeHtml(turn.speaker)} · ${duration(turn.start)}–${duration(turn.end)}</span>`).join("");
+    renderTimeline(job.speaker_segments || [], job.duration_seconds);
     const terminal = ["completed","cancelled","failed"].includes(job.state); $("cancel").disabled = terminal || job.cancel_requested;
     const result = $("result"); result.classList.toggle("hidden", !job.result_available); result.href = apiUrl(`/api/jobs/${job.id}/result.md`, true);
     if (terminal) stopWatching(); loadJobs();
+  }
+  const SPEAKER_COLORS = ["#58aa9b", "#e8a05a", "#877bd7", "#62a9c4", "#d37f98", "#91ad58", "#aa87c9", "#be9364"];
+  function renderTimeline(segments, durationSeconds) {
+    const timeline = $("timeline");
+    const valid = segments.filter((turn) => Number.isFinite(Number(turn.start)) && Number.isFinite(Number(turn.end)) && Number(turn.end) > Number(turn.start));
+    if (!valid.length) { timeline.innerHTML = '<p class="timeline-empty">화자 분리가 완료되면 발화 구간을 시간축으로 표시합니다.</p>'; return; }
+    const durationValue = Math.max(Number(durationSeconds) || 0, ...valid.map((turn) => Number(turn.end)), 0.1);
+    const speakers = [...new Set(valid.map((turn) => String(turn.speaker)))];
+    const rows = speakers.map((speaker, index) => {
+      const turns = valid.filter((turn) => String(turn.speaker) === speaker).map((turn) => {
+        const start = Math.max(0, Math.min(durationValue, Number(turn.start)));
+        const end = Math.max(start, Math.min(durationValue, Number(turn.end)));
+        const left = (start / durationValue) * 100;
+        const width = Math.max(0.3, ((end - start) / durationValue) * 100);
+        const description = `${speaker} · ${duration(start)}–${duration(end)}`;
+        return `<span class="speaker-turn" title="${escapeHtml(description)}" aria-label="${escapeHtml(description)}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%;background:${SPEAKER_COLORS[index % SPEAKER_COLORS.length]}"></span>`;
+      }).join("");
+      return `<div class="speaker-lane"><div class="speaker-label">${escapeHtml(speaker)}</div><div class="speaker-track">${turns}</div></div>`;
+    }).join("");
+    timeline.innerHTML = `<p class="timeline-title">화자 타임라인</p><div class="timeline-scale"><span>00:00</span><span>${duration(durationValue)}</span></div>${rows}`;
   }
   function stopWatching() { if (events) { events.close(); events = null; } if (polling) { clearInterval(polling); polling = null; } }
   function watch(id) {
@@ -202,13 +222,24 @@ def _index_page() -> str:
     select.disabled = !preferred;
     updateProfileState();
   }
+  async function refreshProtectedData() {
+    $("upload-status").textContent = "서버 연결을 확인하고 있습니다…";
+    try { await Promise.all([loadProfiles(), loadJobs()]); $("upload-status").textContent = "서버에 연결했습니다."; }
+    catch (error) { $("upload-status").textContent = error.message; }
+  }
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
   $("profile").addEventListener("change", updateProfileState);
+  $("token")?.addEventListener("change", refreshProtectedData);
   $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = profiles.find((profile) => profile.key === $("profile").value); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
   $("cancel").addEventListener("click", async () => { if (!activeId) return; try { render((await request(`/api/jobs/${activeId}/cancel`, {method:"POST"})).job); } catch (error) { $("current-notice").textContent = error.message; $("current-notice").classList.add("error"); } });
   Promise.all([loadProfiles(), loadJobs()]).catch((error) => { $("upload-status").textContent = error.message; });
 </script>
 </body></html>"""
+    token_section = """
+      <label for="token">접근 토큰</label><input id="token" type="password" autocomplete="off" placeholder="서버에 설정한 토큰을 입력한 뒤 다른 곳을 클릭하세요">
+      <p class="hint">이 서버는 로컬 네트워크에 열려 있어 접근 토큰이 필요합니다.</p>
+    """ if access_token_required else ""
+    return page.replace("__ACCESS_TOKEN_SECTION__", token_section)
 
 
 def create_app(
@@ -257,7 +288,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
-        return _index_page()
+        return _index_page(access_token_required=bool(token))
 
     @app.get("/api/health")
     def health(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -407,9 +438,10 @@ def main() -> None:
     arguments = _parse_arguments()
     access_token = os.environ.get("TALKTRACKER_WEB_TOKEN", "").strip() or None
     if not _is_loopback_host(arguments.host) and not access_token:
-        raise SystemExit(
-            "로컬 네트워크에 서버를 열려면 TALKTRACKER_WEB_TOKEN을 먼저 설정해야 합니다. "
-            "SSH 터널만 사용할 때는 기본 주소 127.0.0.1을 그대로 사용하세요."
+        print(
+            "Warning: the server is open to the local network without an access token. "
+            "Use only on a trusted internal network; never expose this address to the internet.",
+            flush=True,
         )
 
     import uvicorn
