@@ -114,6 +114,17 @@ class JobManagerTests(unittest.TestCase):
 
 
 class ServerPageTests(unittest.TestCase):
+    def test_windows_web_runner_forwards_server_long_options_unchanged(self) -> None:
+        runner = Path(__file__).resolve().parents[1] / "scripts" / "windows" / "Run-Web.ps1"
+        content = runner.read_text(encoding="utf-8")
+
+        self.assertNotIn("[CmdletBinding()]", content)
+        self.assertIn("$ServerArguments = @()", content)
+        self.assertIn("$args.Count", content)
+        self.assertIn("'-BindHost'", content)
+        self.assertIn("'--host'", content)
+        self.assertIn("& $Python @Arguments", content)
+
     def test_model_preparation_command_matches_the_server_platform(self) -> None:
         profile = get_whisper_profile("small")
 

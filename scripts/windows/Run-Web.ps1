@@ -1,13 +1,3 @@
-[CmdletBinding()]
-param(
-    [Alias('Host')]
-    [string]$BindHost,
-    [ValidateRange(1, 65535)]
-    [int]$Port,
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$ServerArguments
-)
-
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -24,11 +14,21 @@ if (-not (Test-Path -LiteralPath $SourceRoot)) {
 
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$SourceRoot;$env:PYTHONPATH" } else { $SourceRoot }
 $Arguments = @('-m', 'talktracker.server')
-if ($PSBoundParameters.ContainsKey('BindHost')) {
-    $Arguments += @('--host', $BindHost)
-}
-if ($PSBoundParameters.ContainsKey('Port')) {
-    $Arguments += @('--port', $Port.ToString())
+# Do not declare PowerShell parameters here.  The server's --host, --port,
+# and other long options are forwarded unchanged, like the macOS/Linux runner.
+$ServerArguments = @()
+for ($index = 0; $index -lt $args.Count; $index += 1) {
+    $argument = [string]$args[$index]
+    if ($argument -in @('-BindHost', '-Host', '-Port')) {
+        if (($index + 1) -ge $args.Count) {
+            throw "$argument 옵션에는 값이 필요합니다."
+        }
+        $option = if ($argument -eq '-Port') { '--port' } else { '--host' }
+        $index += 1
+        $ServerArguments += @($option, [string]$args[$index])
+    } else {
+        $ServerArguments += $argument
+    }
 }
 $Arguments += $ServerArguments
 

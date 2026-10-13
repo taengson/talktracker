@@ -17,7 +17,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Gui.ps1
 
 CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. CTranslate2 GPU 실행에는 NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다.
 
-브라우저 서버로 실행하려면 다음 명령을 사용합니다. `-BindHost 0.0.0.0`을 지정하면 신뢰할 수 있는 내부 네트워크에서 다른 PC가 직접 접속할 수 있고, `-Port 8081`처럼 포트를 바꿀 수 있습니다.
+브라우저 서버로 실행하려면 다음 명령을 사용합니다. macOS·Linux와 똑같이 `--host 0.0.0.0`을 지정하면 신뢰할 수 있는 내부 네트워크에서 다른 PC가 직접 접속할 수 있고, `--port 8081`처럼 포트를 바꿀 수 있습니다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1
@@ -77,7 +77,7 @@ ssh -L 8080:127.0.0.1:8080 user@remote-host
 
 포트를 바꾼 경우에는 SSH 터널 명령의 양쪽 포트도 같은 번호로 지정합니다. 예: `ssh -L 8081:127.0.0.1:8081 user@remote-host`
 
-신뢰할 수 있는 내부 네트워크에만 직접 열려면 macOS·Linux에서는 `--host 0.0.0.0`, Windows에서는 `-BindHost 0.0.0.0`을 각 `Run-Web` 명령에 추가합니다. 이 경우 토큰은 필요하지 않습니다. 외부 인터넷에 직접 공개하지 마세요.
+신뢰할 수 있는 내부 네트워크에만 직접 열려면 모든 운영체제에서 `--host 0.0.0.0`을 각 `Run-Web` 명령에 추가합니다. 이 경우 토큰은 필요하지 않습니다. 외부 인터넷에 직접 공개하지 마세요.
 
 내부망 사용자도 제한해야 한다면 `TALKTRACKER_WEB_TOKEN`을 설정합니다. 이 경우에만 웹 화면에 접근 토큰 입력란이 표시됩니다. 서버는 업로드 파일을 `outputs/jobs/` 아래에 작업별로 보관하고, GPU·메모리 충돌을 피하기 위해 분석을 한 번에 하나씩 처리합니다. 업로드 크기·보관 기간·포트는 `TALKTRACKER_WEB_MAX_UPLOAD_MB`, `TALKTRACKER_WEB_RETENTION_DAYS`, `TALKTRACKER_WEB_PORT` 환경 변수로 조정할 수 있습니다.
 

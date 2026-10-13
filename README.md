@@ -152,7 +152,7 @@ bash scripts/linux/Run-Web.sh --port 8081
 
 ```powershell
 # Windows
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -Port 8081
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 --port 8081
 ```
 
 다른 PC에서는 서버에 SSH 터널을 연 뒤 브라우저에서 `http://localhost:8080`으로 접속하세요.
@@ -174,7 +174,7 @@ bash scripts/linux/Run-Web.sh --host 0.0.0.0
 
 ```powershell
 # Windows
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -BindHost 0.0.0.0
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 --host 0.0.0.0
 ```
 
 내부망의 다른 사용자를 제한해야 한다면 선택적으로 `TALKTRACKER_WEB_TOKEN`을 설정할 수 있습니다. 이때만 웹 화면에 **접근 토큰** 입력란이 표시됩니다.
@@ -190,7 +190,7 @@ TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
 
 ```powershell
 $env:TALKTRACKER_WEB_TOKEN = '길고_임의적인_비밀값'
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -BindHost 0.0.0.0
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 --host 0.0.0.0
 ```
 
 웹 서버는 한 번에 하나의 분석 작업만 실행해 GPU·메모리 충돌을 피합니다. 업로드와 결과는 `outputs/jobs/`에 작업별로 보관하며, 서버를 시작할 때 기본 7일보다 오래된 작업 폴더를 정리합니다. `TALKTRACKER_WEB_MAX_UPLOAD_MB`(기본 2048MB), `TALKTRACKER_WEB_RETENTION_DAYS`(기본 7일), `TALKTRACKER_WEB_PORT`(기본 8080) 환경 변수로 조정할 수 있습니다.
