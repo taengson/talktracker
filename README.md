@@ -1,6 +1,6 @@
 # TalkTracker
 
-로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 정리하는 Windows·macOS·Linux용 프로그램입니다. 데스크톱 화면은 세 운영체제에서 실행할 수 있고, Linux에서는 다른 PC의 브라우저 요청을 처리하는 웹 서버 모드도 제공합니다. 음성 파일과 분석 결과는 TalkTracker가 실행 중인 PC 안에서 처리합니다.
+로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 정리하는 Windows·macOS·Linux용 프로그램입니다. 데스크톱 화면과 다른 PC의 브라우저 요청을 처리하는 웹 서버 모드를 세 운영체제에서 제공합니다. 음성 파일과 분석 결과는 TalkTracker가 실행 중인 PC 안에서 처리합니다.
 
 > **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
@@ -16,7 +16,7 @@
 - 화자별 타임라인을 전사 중에도 먼저 표시
 - 경과 시간과 진행 상태 표시, Whisper 전사 중에는 처리된 녹음 시각 표시
 - 분석 중단 시, 실행 중인 네이티브 화자 분리 작업을 즉시 종료하고 그 시점까지 완성된 화자 구간과 전사 결과 유지
-- Linux 웹 서버 모드에서 브라우저 업로드, 단일 작업 대기열, 진행 상태·화자 타임라인, 중단, Markdown 결과 다운로드
+- 웹 서버 모드에서 브라우저 업로드, 단일 작업 대기열, 진행 상태·화자 타임라인, 중단, Markdown 결과 다운로드
 - 읽기 쉬운 Markdown 형식으로 결과 저장
 
 ## 현재 작업 상태
@@ -44,6 +44,8 @@
 
 모델은 프로젝트의 `models` 폴더에 저장됩니다. 화면에서 전사 품질을 고르면 그 선택에 맞는 모델만 준비 메뉴에서 내려받아 사용할 수 있습니다.
 
+브라우저로 사용할 때는 `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1`을 실행합니다. [웹 서버로 실행하기](#웹-서버로-실행하기)의 접속·포트 안내를 따르세요.
+
 > **Windows·Linux CUDA GPU 사용:** Windows는 CTranslate2가 CUDA GPU를 사용할 수 있으면 Small·Turbo용 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. Linux는 준비된 CTranslate2 모델 하나를 GPU `float16`과 CPU `int8`에 함께 사용합니다. NVIDIA 드라이버가 필요하며, Linux 설치 스크립트는 GPU를 감지하면 필요한 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 `.venv`에 자동으로 설치하고 실행 환경을 설정합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
 
 ## macOS에서 실행하기
@@ -57,6 +59,8 @@
 3. 이후에는 `bash scripts/macos/Run-Gui.sh`
 
 모델은 프로젝트의 `models` 폴더에만 저장됩니다. macOS는 Intel Mac에서 발생할 수 있는 로컬 INT8 변환 오류를 피하기 위해, CTranslate2 형식으로 이미 준비된 Whisper 모델을 직접 받습니다. 전사는 CPU `int8` 설정을 사용합니다. 화자 분리는 Nemotron GGUF를 공식 네이티브 실행기로 처리하며, Intel Mac에서도 실제 화자 구간을 분리합니다.
+
+브라우저로 사용할 때는 `bash scripts/macos/Run-Web.sh`을 실행합니다. [웹 서버로 실행하기](#웹-서버로-실행하기)의 접속·포트 안내를 따르세요.
 
 > **Intel Mac 사용 전 안내:** Intel Mac에서는 Whisper 전사와 Nemotron 화자 분리가 모두 CPU로 실행됩니다. 특히 긴 녹음은 화자 분리 단계부터 시간이 많이 걸려 실사용 효율이 크게 떨어질 수 있습니다. **빠른 전사(Small)**를 선택하면 Whisper 전사 시간은 줄지만 화자 분리 시간은 줄지 않습니다. 긴 녹음의 실제 분석은 CUDA GPU를 사용할 수 있는 Linux 또는 Windows PC를 권장합니다.
 
@@ -127,18 +131,28 @@ scp user@remote-host:~/talktracker-recordings/파일명.m4a ~/Downloads/
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
 
-### Linux 웹 서버로 실행하기
+### 웹 서버로 실행하기
 
-Linux GPU PC에서 모델을 준비한 뒤 다음 명령으로 웹 서버를 시작할 수 있습니다. 기본값은 서버 PC 내부에서만 접속할 수 있는 `127.0.0.1:8080`입니다.
+모델을 준비한 컴퓨터에서 웹 서버를 시작하면, 다른 PC는 브라우저만으로 녹음 파일을 올리고 결과를 받을 수 있습니다. 기본 주소는 서버 PC 내부에서만 접속할 수 있는 `127.0.0.1:8080`입니다.
+
+| 서버 운영체제 | 실행 명령 |
+| --- | --- |
+| Windows | `powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1` |
+| macOS | `bash scripts/macos/Run-Web.sh` |
+| Linux | `bash scripts/linux/Run-Web.sh` |
+
+포트 번호를 8081로 바꾸는 예시는 다음과 같습니다.
 
 ```bash
-bash scripts/linux/Run-Web.sh
+# macOS
+bash scripts/macos/Run-Web.sh --port 8081
+# Linux
+bash scripts/linux/Run-Web.sh --port 8081
 ```
 
-포트 번호는 `--port` 옵션으로 바꿀 수 있습니다. 예를 들어 8081 포트에서 서버를 시작하려면 다음을 실행합니다.
-
-```bash
-bash scripts/linux/Run-Web.sh --port 8081
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -Port 8081
 ```
 
 다른 PC에서는 서버에 SSH 터널을 연 뒤 브라우저에서 `http://localhost:8080`으로 접속하세요.
@@ -152,19 +166,36 @@ ssh -L 8080:127.0.0.1:8080 user@remote-host
 신뢰할 수 있는 내부 네트워크에서만 사용할 경우에는 다음처럼 직접 열 수 있습니다. 이 경우 접근 토큰 입력은 필요 없습니다. 인터넷에 직접 공개하는 용도로는 사용하지 마세요.
 
 ```bash
+# macOS
+bash scripts/macos/Run-Web.sh --host 0.0.0.0
+# Linux
 bash scripts/linux/Run-Web.sh --host 0.0.0.0
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -BindHost 0.0.0.0
 ```
 
 내부망의 다른 사용자를 제한해야 한다면 선택적으로 `TALKTRACKER_WEB_TOKEN`을 설정할 수 있습니다. 이때만 웹 화면에 **접근 토큰** 입력란이 표시됩니다.
 
 ```bash
+# macOS
+TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
+  bash scripts/macos/Run-Web.sh --host 0.0.0.0
+# Linux
 TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
   bash scripts/linux/Run-Web.sh --host 0.0.0.0
 ```
 
+```powershell
+$env:TALKTRACKER_WEB_TOKEN = '길고_임의적인_비밀값'
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1 -BindHost 0.0.0.0
+```
+
 웹 서버는 한 번에 하나의 분석 작업만 실행해 GPU·메모리 충돌을 피합니다. 업로드와 결과는 `outputs/jobs/`에 작업별로 보관하며, 서버를 시작할 때 기본 7일보다 오래된 작업 폴더를 정리합니다. `TALKTRACKER_WEB_MAX_UPLOAD_MB`(기본 2048MB), `TALKTRACKER_WEB_RETENTION_DAYS`(기본 7일), `TALKTRACKER_WEB_PORT`(기본 8080) 환경 변수로 조정할 수 있습니다.
 
-웹 화면에서는 이 PC에서 실제로 실행 가능한 전사 모델만 선택할 수 있습니다. 준비되지 않은 모델은 **준비 필요**로 비활성화되며, 직접 요청을 보내더라도 서버가 파일을 작업 대기열에 넣기 전에 거절합니다. 원하는 품질이 비활성화되어 있으면 해당 프로필로 `scripts/linux/Download-Models.sh --whisper-profile ...`를 실행한 뒤 브라우저를 새로고침하세요.
+웹 화면에서는 이 PC에서 실제로 실행 가능한 전사 모델만 선택할 수 있습니다. 준비되지 않은 모델은 **준비 필요**로 비활성화되며, 직접 요청을 보내더라도 서버가 파일을 작업 대기열에 넣기 전에 거절합니다. 원하는 품질이 비활성화되어 있으면 서버가 표시하는 현재 운영체제용 준비 명령을 실행한 뒤 브라우저를 새로고침하세요. Windows는 모델 다운로드 뒤 로컬 실행용 변환도 필요하므로 안내 명령에 `-PrepareForLocalUse`가 함께 포함됩니다.
 
 화자 분리가 끝나면 웹 화면의 현재 작업 영역에 화자별 발화 구간을 녹음 전체 시간축에 맞춘 색상 레인으로 표시합니다. 각 구간에 마우스를 올리면 화자와 시작·종료 시각을 확인할 수 있습니다.
 

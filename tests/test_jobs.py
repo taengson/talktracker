@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from talktracker.core.jobs import JobManager
-from talktracker.server import _index_page, create_app, main as server_main
+from talktracker.core.models import get_whisper_profile
+from talktracker.server import _index_page, _model_download_command, create_app, main as server_main
 
 
 class FakeResult:
@@ -113,6 +114,26 @@ class JobManagerTests(unittest.TestCase):
 
 
 class ServerPageTests(unittest.TestCase):
+    def test_model_preparation_command_matches_the_server_platform(self) -> None:
+        profile = get_whisper_profile("small")
+
+        with patch("talktracker.server.sys.platform", "win32"):
+            self.assertEqual(
+                _model_download_command(profile),
+                "powershell -ExecutionPolicy Bypass -File "
+                ".\\scripts\\windows\\Download-Models.ps1 -WhisperProfile small -PrepareForLocalUse",
+            )
+        with patch("talktracker.server.sys.platform", "darwin"):
+            self.assertEqual(
+                _model_download_command(profile),
+                "bash scripts/macos/Download-Models.sh --whisper-profile small",
+            )
+        with patch("talktracker.server.sys.platform", "linux"):
+            self.assertEqual(
+                _model_download_command(profile),
+                "bash scripts/linux/Download-Models.sh --whisper-profile small",
+            )
+
     def test_embedded_client_script_uses_a_valid_quote_key_for_html_escaping(self) -> None:
         """Keep Python string escaping from corrupting the browser client."""
 
@@ -123,6 +144,8 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('event.preventDefault()', page)
         self.assertIn('function renderTimeline(segments, durationSeconds)', page)
         self.assertIn('class="speaker-lane"', page)
+        self.assertIn('id="server-setup"', page)
+        self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
         protected_page = _index_page(access_token_required=True)
         self.assertIn('id="token"', protected_page)
@@ -131,6 +154,13 @@ class ServerPageTests(unittest.TestCase):
     def test_server_disables_missing_models_and_rejects_their_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with TestClient(create_app(project_root=Path(directory))) as client:
+                page = client.get("/").text
+                self.assertIn("분석 요청 수신 불가", page)
+                self.assertIn("이 PC는 현재 요청 처리 서버가 아닙니다.", page)
+                self.assertIn("파일 업로드와 분석 요청은 받지 않습니다.", page)
+                self.assertNotIn("config.json", page)
+                self.assertNotIn('id="upload-form"', page)
+
                 profiles = client.get("/api/profiles").json()["profiles"]
                 small = next(profile for profile in profiles if profile["key"] == "small")
                 self.assertFalse(small["available"])

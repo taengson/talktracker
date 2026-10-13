@@ -17,6 +17,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Gui.ps1
 
 CUDA GPU 실행이 준비된 Windows 환경에서는 모델 준비 스크립트가 CPU `int8` 대체 모델과 CUDA GPU `float16` 모델을 함께 만듭니다. 앱은 GPU를 우선 사용하고, 실행 중 GPU를 쓰지 못하면 Small·Turbo를 CPU 모델로 자동 전환합니다. CTranslate2 GPU 실행에는 NVIDIA 드라이버, CUDA 12.x 런타임, cuDNN 9가 필요합니다.
 
+브라우저 서버로 실행하려면 다음 명령을 사용합니다. `-BindHost 0.0.0.0`을 지정하면 신뢰할 수 있는 내부 네트워크에서 다른 PC가 직접 접속할 수 있고, `-Port 8081`처럼 포트를 바꿀 수 있습니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Run-Web.ps1
+```
+
 ## macOS
 
 프로젝트 최상위 폴더의 터미널에서 아래 순서대로 실행합니다. `Install-Dependencies.sh`는 설치된 Python 3.11+Tkinter를 재사용합니다. 없으면 프로젝트 내부 `.tools`에 사전 빌드 Python 3.11을 내려받으므로 Homebrew가 Python·Tkinter를 소스에서 컴파일하지 않습니다. 같은 위치에 Nemotron 화자 분리용 공식 네이티브 실행기도 설치합니다. Homebrew는 FFmpeg 설치에만 사용하며, 사전 빌드 bottle을 우선 요청합니다. Homebrew가 없다면 [먼저 설치](https://brew.sh)해 주세요.
@@ -30,6 +36,12 @@ bash scripts/macos/Run-Gui.sh
 macOS에서는 빠른 전사(Small)와 권장(Turbo) 프로필을 CPU로 사용할 수 있습니다. `Download-Models.sh`는 CTranslate2 형식으로 준비된 모델을 직접 받아 Intel Mac에서 로컬 INT8 변환 중 발생할 수 있는 충돌을 피하고, Nemotron의 공식 GGUF 화자 분리 모델도 함께 받습니다. 기존 원본 Whisper 파일만 이미 받아 둔 경우에는 `Prepare-FasterWhisper.sh`를 실행하면 같은 준비된 모델을 내려받습니다. 최고 정확도(Large-v3)는 CUDA GPU가 필요해 macOS에서는 실행할 수 없습니다.
 
 화자 분리는 Python PyTorch 경로가 아니라 공식 NeMo-Speech.cpp 실행기를 씁니다. Intel Mac에서는 CPU, Apple Silicon에서는 Metal을 자동 선택하며 실행기는 프로젝트 내부 `.tools/nemo-speech`에만 설치됩니다.
+
+브라우저 서버로 실행하려면 다음 명령을 사용합니다. `--host 0.0.0.0`을 지정하면 신뢰할 수 있는 내부 네트워크에서 다른 PC가 직접 접속할 수 있고, `--port 8081`처럼 포트를 바꿀 수 있습니다.
+
+```bash
+bash scripts/macos/Run-Web.sh
+```
 
 ## Linux
 
@@ -49,21 +61,15 @@ Linux는 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받아 로�
 
 실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.
 
-### Linux 웹 서버 실행
-
-Linux에서는 GUI 대신 브라우저 요청을 받는 서버 모드를 실행할 수 있습니다. `Install-Dependencies.sh`를 실행하면 웹 서버에 필요한 Python 패키지도 함께 설치됩니다.
+브라우저 서버로 실행하려면 다음 명령을 사용합니다. `--host 0.0.0.0`을 지정하면 신뢰할 수 있는 내부 네트워크에서 다른 PC가 직접 접속할 수 있고, `--port 8081`처럼 포트를 바꿀 수 있습니다.
 
 ```bash
 bash scripts/linux/Run-Web.sh
 ```
 
-포트 번호는 `--port` 옵션으로 바꿀 수 있습니다.
+## 웹 서버 접속
 
-```bash
-bash scripts/linux/Run-Web.sh --port 8081
-```
-
-기본 주소는 `127.0.0.1:8080`이므로 SSH 터널을 통해 다른 PC의 브라우저에서 안전하게 접속할 수 있습니다.
+`Run-Web` 실행 스크립트는 Windows·macOS·Linux 모두에서 같은 웹 서버를 시작합니다. 기본 주소는 `127.0.0.1:8080`이며, SSH 터널을 사용하면 서버를 외부 네트워크에 직접 열지 않고 다른 PC의 브라우저에서 안전하게 접속할 수 있습니다.
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 user@remote-host
@@ -71,20 +77,9 @@ ssh -L 8080:127.0.0.1:8080 user@remote-host
 
 포트를 바꾼 경우에는 SSH 터널 명령의 양쪽 포트도 같은 번호로 지정합니다. 예: `ssh -L 8081:127.0.0.1:8081 user@remote-host`
 
-신뢰할 수 있는 내부 네트워크에서 직접 접속하게 하려면 `--host 0.0.0.0`을 지정합니다. 이 경우 토큰은 필요하지 않습니다. 외부 인터넷에 직접 공개하지 마세요.
+신뢰할 수 있는 내부 네트워크에만 직접 열려면 macOS·Linux에서는 `--host 0.0.0.0`, Windows에서는 `-BindHost 0.0.0.0`을 각 `Run-Web` 명령에 추가합니다. 이 경우 토큰은 필요하지 않습니다. 외부 인터넷에 직접 공개하지 마세요.
 
-```bash
-bash scripts/linux/Run-Web.sh --host 0.0.0.0
-```
-
-내부망 사용자도 제한해야 한다면 `TALKTRACKER_WEB_TOKEN`을 설정합니다. 이 경우에만 웹 화면에 접근 토큰 입력란이 표시됩니다.
-
-```bash
-TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
-  bash scripts/linux/Run-Web.sh --host 0.0.0.0
-```
-
-서버는 업로드 파일을 `outputs/jobs/` 아래에 작업별로 보관하고, GPU·메모리 충돌을 피하기 위해 분석을 한 번에 하나씩 처리합니다. 업로드 크기·보관 기간·포트는 `TALKTRACKER_WEB_MAX_UPLOAD_MB`, `TALKTRACKER_WEB_RETENTION_DAYS`, `TALKTRACKER_WEB_PORT` 환경 변수로 조정할 수 있습니다.
+내부망 사용자도 제한해야 한다면 `TALKTRACKER_WEB_TOKEN`을 설정합니다. 이 경우에만 웹 화면에 접근 토큰 입력란이 표시됩니다. 서버는 업로드 파일을 `outputs/jobs/` 아래에 작업별로 보관하고, GPU·메모리 충돌을 피하기 위해 분석을 한 번에 하나씩 처리합니다. 업로드 크기·보관 기간·포트는 `TALKTRACKER_WEB_MAX_UPLOAD_MB`, `TALKTRACKER_WEB_RETENTION_DAYS`, `TALKTRACKER_WEB_PORT` 환경 변수로 조정할 수 있습니다.
 
 ## 전사 품질 선택
 

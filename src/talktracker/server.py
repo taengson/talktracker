@@ -73,6 +73,25 @@ def _native_nemotron_binary(project_root: Path) -> Path | None:
     return None
 
 
+def _model_download_command(profile: WhisperProfile) -> str:
+    """Return the current platform's command for preparing one profile.
+
+    Windows downloads the upstream checkpoint first, so it must also request
+    its local CTranslate2 conversion.  macOS and Linux download an already
+    prepared model directly.
+    """
+
+    if sys.platform == "win32":
+        return (
+            "powershell -ExecutionPolicy Bypass -File "
+            f".\\scripts\\windows\\Download-Models.ps1 -WhisperProfile {profile.key} "
+            "-PrepareForLocalUse"
+        )
+    if sys.platform == "darwin":
+        return f"bash scripts/macos/Download-Models.sh --whisper-profile {profile.key}"
+    return f"bash scripts/linux/Download-Models.sh --whisper-profile {profile.key}"
+
+
 def _profile_availability(project_root: Path, profile: WhisperProfile) -> tuple[bool, str | None]:
     """Return whether a profile can start without a model-related failure."""
 
@@ -82,7 +101,7 @@ def _profile_availability(project_root: Path, profile: WhisperProfile) -> tuple[
 
     missing_files = missing_whisper_runtime_files(project_root / "models" / runtime.folder, profile)
     if missing_files:
-        command = f"bash scripts/linux/Download-Models.sh --whisper-profile {profile.key}"
+        command = _model_download_command(profile)
         return False, f"Whisper 모델이 준비되지 않았습니다 ({', '.join(missing_files)} 없음). {command}을 실행해 주세요."
 
     native_diarization = sys.platform == "darwin" or sys.platform.startswith("linux")
@@ -106,6 +125,39 @@ def _profile_payload(project_root: Path) -> list[dict[str, Any]]:
         }
         for profile in WHISPER_PROFILES
     ]
+
+
+def _server_unavailable_page() -> str:
+    """Show a distinct status page when this PC cannot process any request."""
+
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TalkTracker 서버 · 준비 필요</title>
+  <style>
+    :root {{ color-scheme: light; --navy:#103640; --teal:#147d7e; --mint:#e5f4ef; --line:#d8e6e2; --ink:#193037; --muted:#617178; --danger:#a64242; }}
+    * {{ box-sizing:border-box; }} body {{ margin:0; background:#f4f7f6; color:var(--ink); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
+    header {{ padding:34px 22px; color:#fff; background:var(--navy); }} header div, main {{ width:min(800px,calc(100% - 32px)); margin:auto; }}
+    h1 {{ margin:0; font-size:29px; }} header p {{ margin:6px 0 0; color:#cde5df; }} main {{ padding:34px 0 52px; }}
+    section {{ padding:28px; border:1px solid var(--line); border-radius:12px; background:#fff; box-shadow:0 4px 14px rgb(16 54 64 / 5%); }}
+    .badge {{ display:inline-block; padding:3px 10px; border-radius:999px; color:#923b3b; background:#fbecec; font-size:13px; font-weight:750; }} h2 {{ margin:13px 0 8px; font-size:25px; }} h3 {{ margin:26px 0 7px; font-size:17px; }} p {{ margin:8px 0; }} .reason {{ margin-top:20px; padding:13px 15px; border-radius:8px; color:var(--danger); background:#fbecec; }} .reason p {{ margin:3px 0 0; }} .hint {{ color:var(--muted); }} code {{ overflow-wrap:anywhere; padding:2px 5px; border-radius:4px; background:#edf3f1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9em; }}
+  </style>
+</head>
+<body>
+<header><div><h1>TalkTracker 서버</h1><p>이 서버 PC에서 화자 분리와 전사를 처리합니다.</p></div></header>
+<main><section>
+  <span class="badge">분석 요청 수신 불가</span>
+  <h2>이 PC는 현재 요청 처리 서버가 아닙니다.</h2>
+  <p>이 PC에는 분석에 필요한 로컬 모델이 준비되지 않아, 이 서버는 분석 요청을 받을 수 없습니다.</p>
+  <div class="reason"><strong>현재 상태</strong><p>실행 가능한 전사 프로필이 없습니다. 파일 업로드와 분석 요청은 받지 않습니다.</p></div>
+  <h3>이 PC에서 분석 서버를 운영하려면</h3>
+  <p>로컬 모델을 준비한 뒤 웹 서버를 다시 시작하세요.</p>
+  <h3>다른 PC의 분석 서버를 사용하려면</h3>
+  <p class="hint">이 PC에서는 <code>Run-Web</code>을 실행하지 말고, 모델과 처리 성능이 있는 서버 PC의 웹 주소로 브라우저에서 접속하세요.</p>
+</section></main>
+</body></html>"""
 
 
 def _index_page(*, access_token_required: bool = False) -> str:
@@ -148,6 +200,7 @@ def _index_page(*, access_token_required: bool = False) -> str:
       __ACCESS_TOKEN_SECTION__
       <div class="actions"><button id="submit" type="submit" disabled>업로드하고 분석 시작</button><span id="upload-status" class="hint"></span></div>
     </form>
+    <div id="server-setup" class="notice error hidden" role="status"></div>
   </section>
   <section id="current" class="hidden">
     <h2>현재 작업</h2><div id="current-notice" class="notice"></div><div class="progress" aria-label="분석 진행률"><div id="progress-bar"></div></div>
@@ -207,8 +260,18 @@ def _index_page(*, access_token_required: bool = False) -> str:
   }
   function updateProfileState() {
     const selected = profiles.find((profile) => profile.key === $("profile").value);
-    const status = $("profile-status"), button = $("submit");
-    if (!selected) { status.textContent = "준비된 전사 모델이 없습니다. 모델을 준비한 뒤 이 페이지를 새로고침해 주세요."; status.className = "hint error"; button.disabled = true; return; }
+    const status = $("profile-status"), button = $("submit"), form = $("upload-form"), setup = $("server-setup");
+    const available = profiles.filter((profile) => profile.available);
+    if (!available.length) {
+      const preferred = profiles.find((profile) => profile.key === "turbo") || profiles[0];
+      form.classList.add("hidden");
+      setup.classList.remove("hidden");
+      setup.textContent = `이 서버에는 지금 실행할 전사 모델이 없어 분석 요청을 받을 수 없습니다. ${preferred?.unavailable_reason || "모델을 준비한 뒤 페이지를 새로고침해 주세요."}`;
+      return;
+    }
+    form.classList.remove("hidden");
+    setup.classList.add("hidden");
+    if (!selected) { status.textContent = "준비된 전사 모델을 선택해 주세요."; status.className = "hint error"; button.disabled = true; return; }
     status.textContent = selected.available ? selected.description : `준비 필요: ${selected.unavailable_reason}`;
     status.className = selected.available ? "hint" : "hint error";
     button.disabled = !selected.available;
@@ -288,6 +351,9 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
+        profiles = _profile_payload(project_root)
+        if not any(profile["available"] for profile in profiles):
+            return _server_unavailable_page()
         return _index_page(access_token_required=bool(token))
 
     @app.get("/api/health")
