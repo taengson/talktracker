@@ -37,17 +37,14 @@ Windows는 변환 과정에서 CPU·CUDA 전용 폴더를 각각 만들 수 있�
 
 ## CTranslate2 Whisper 폴더의 필수 파일
 
-macOS·Linux에서 직접 받은 모델과 Windows에서 변환해 만든 실행 모델은 다음 파일을 모두 가져야 합니다.
+`model.bin`만 있다고 모델 준비가 끝난 것이 아닙니다. 공식 CTranslate2 저장소의 파일 구성은 모델별로 다릅니다.
 
-```text
-config.json
-preprocessor_config.json
-model.bin
-tokenizer.json
-vocabulary.json
-```
+| 프로필 | 필수 파일 |
+| --- | --- |
+| Small | `config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt` |
+| Turbo·Large-v3 | `config.json`, `preprocessor_config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json` |
 
-`model.bin`만 있다고 모델 준비가 끝난 것이 아닙니다. TalkTracker와 최신 macOS·Linux 다운로드 스크립트는 다섯 파일을 모두 검사합니다. 하나라도 없으면 모델 관리 화면에서 **모델 다운로드 시작**을 누르거나 현재 운영체제용 다운로드 스크립트를 다시 실행하세요.
+TalkTracker와 최신 macOS·Linux 다운로드 스크립트는 선택한 모델에 맞는 파일을 검사합니다. 하나라도 없으면 모델 관리 화면에서 **모델 다운로드 시작**을 누르거나 현재 운영체제용 다운로드 스크립트를 다시 실행하세요.
 
 예를 들어 Linux의 Large-v3 폴더에 구성 파일만 빠진 경우, 아래 명령은 이미 받은 큰 `model.bin`을 유지하고 누락된 파일만 다시 받습니다.
 

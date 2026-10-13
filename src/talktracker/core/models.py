@@ -19,6 +19,7 @@ class WhisperProfile:
     source_folder: str
     cpu_runtime_folder: str | None
     cuda_runtime_folder: str
+    runtime_file_sets: tuple[tuple[str, ...], ...]
 
     @property
     def requires_gpu(self) -> bool:
@@ -59,6 +60,12 @@ WHISPER_PROFILES: tuple[WhisperProfile, ...] = (
         source_folder="whisper-small",
         cpu_runtime_folder="whisper-small-ct2",
         cuda_runtime_folder="whisper-small-ct2-cuda-fp16",
+        # Systran's ready-to-run Small checkpoint predates the newer
+        # preprocessor_config.json/vocabulary.json layout.
+        runtime_file_sets=(
+            ("config.json", "model.bin", "tokenizer.json", "vocabulary.txt"),
+            ("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.json"),
+        ),
     ),
     WhisperProfile(
         key="turbo",
@@ -69,6 +76,7 @@ WHISPER_PROFILES: tuple[WhisperProfile, ...] = (
         source_folder="whisper-large-v3-turbo",
         cpu_runtime_folder="whisper-large-v3-turbo-ct2",
         cuda_runtime_folder="whisper-large-v3-turbo-ct2-cuda-fp16",
+        runtime_file_sets=(("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.json"),),
     ),
     WhisperProfile(
         key="large-v3",
@@ -80,27 +88,27 @@ WHISPER_PROFILES: tuple[WhisperProfile, ...] = (
         cpu_runtime_folder=None,
         # Retain the existing GPU model location for users who already prepared it.
         cuda_runtime_folder="whisper-large-v3-ct2",
+        runtime_file_sets=(("config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.json"),),
     ),
 )
 
 _PROFILES_BY_KEY = {profile.key: profile for profile in WHISPER_PROFILES}
 
-# A CTranslate2 Whisper folder is not usable with model.bin alone.  Keep this
-# list in one place so the GUI never reports a partially downloaded model as
-# ready while the analysis engine later fails to load it.
-WHISPER_RUNTIME_FILES: tuple[str, ...] = (
-    "config.json",
-    "preprocessor_config.json",
-    "model.bin",
-    "tokenizer.json",
-    "vocabulary.json",
-)
+def missing_whisper_runtime_files(model_directory: Path, profile: WhisperProfile) -> tuple[str, ...]:
+    """Return missing files for the first compatible CTranslate2 file layout.
 
+    The upstream Small checkpoint uses ``vocabulary.txt`` and intentionally
+    has no preprocessor configuration file, while newer checkpoints use the
+    JSON layout.  A model is ready when it satisfies any supported layout.
+    """
 
-def missing_whisper_runtime_files(model_directory: Path) -> tuple[str, ...]:
-    """Return the required CTranslate2 Whisper files absent from a folder."""
-
-    return tuple(name for name in WHISPER_RUNTIME_FILES if not (model_directory / name).is_file())
+    missing_sets = [
+        tuple(name for name in required_files if not (model_directory / name).is_file())
+        for required_files in profile.runtime_file_sets
+    ]
+    if any(not missing for missing in missing_sets):
+        return ()
+    return min(missing_sets, key=lambda missing: (len(missing), missing))
 
 
 def get_whisper_profile(key: str) -> WhisperProfile:

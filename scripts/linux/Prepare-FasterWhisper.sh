@@ -44,13 +44,13 @@ done
 
 case "$whisper_profile" in
   small)
-    destination_folder="whisper-small-ct2"; display_name="Whisper Small"; repository="Systran/faster-whisper-small"
+    destination_folder="whisper-small-ct2"; display_name="Whisper Small"; repository="Systran/faster-whisper-small"; required_files=(config.json model.bin tokenizer.json vocabulary.txt)
     ;;
   turbo)
-    destination_folder="whisper-large-v3-turbo-ct2"; display_name="Whisper Large-v3 Turbo"; repository="mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+    destination_folder="whisper-large-v3-turbo-ct2"; display_name="Whisper Large-v3 Turbo"; repository="mobiuslabsgmbh/faster-whisper-large-v3-turbo"; required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
     ;;
   large-v3)
-    destination_folder="whisper-large-v3-ct2"; display_name="Whisper Large-v3"; repository="Systran/faster-whisper-large-v3"
+    destination_folder="whisper-large-v3-ct2"; display_name="Whisper Large-v3"; repository="Systran/faster-whisper-large-v3"; required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
     ;;
   *)
     echo "Unknown Whisper profile: $whisper_profile" >&2
@@ -64,7 +64,6 @@ esac
 # selection remains automatic in the application: CUDA FP16 when available,
 # then CPU INT8 for Small and Turbo.
 destination="$project_root/models/$destination_folder"
-required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
 if [[ ! -x "$hugging_face" ]]; then
   echo "Hugging Face CLI was not found: $hugging_face" >&2
   echo "Run scripts/linux/Install-Dependencies.sh first." >&2

@@ -12,6 +12,8 @@ import asyncio
 import hmac
 import json
 import os
+import shutil
+import sys
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -22,7 +24,13 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from .core.jobs import JobManager, JobNotFoundError, JobStateError
-from .core.models import WHISPER_PROFILES, get_cuda_runtime_status
+from .core.models import (
+    WHISPER_PROFILES,
+    WhisperProfile,
+    get_cuda_runtime_status,
+    get_whisper_runtime,
+    missing_whisper_runtime_files,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -48,13 +56,53 @@ def _is_loopback_host(host: str) -> bool:
     return host.strip().lower() in {"127.0.0.1", "::1", "localhost"}
 
 
-def _profile_payload() -> list[dict[str, Any]]:
+def _native_nemotron_binary(project_root: Path) -> Path | None:
+    """Find the native diarization runtime installed for macOS or Linux."""
+
+    configured = os.environ.get("TALKTRACKER_NEMO_SPEECH")
+    candidates = [
+        Path(configured).expanduser() if configured else None,
+        project_root / ".tools" / "nemo-speech" / "bin" / "nemo-speech",
+    ]
+    path_binary = shutil.which("nemo-speech")
+    if path_binary:
+        candidates.append(Path(path_binary))
+    for candidate in candidates:
+        if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _profile_availability(project_root: Path, profile: WhisperProfile) -> tuple[bool, str | None]:
+    """Return whether a profile can start without a model-related failure."""
+
+    runtime = get_whisper_runtime(profile)
+    if not runtime:
+        return False, "호환 CUDA GPU가 없어 이 전사 모델을 실행할 수 없습니다."
+
+    missing_files = missing_whisper_runtime_files(project_root / "models" / runtime.folder, profile)
+    if missing_files:
+        command = f"bash scripts/linux/Download-Models.sh --whisper-profile {profile.key}"
+        return False, f"Whisper 모델이 준비되지 않았습니다 ({', '.join(missing_files)} 없음). {command}을 실행해 주세요."
+
+    native_diarization = sys.platform == "darwin" or sys.platform.startswith("linux")
+    nemotron_weight = "Nemotron-3-Diarization.q8_0.gguf" if native_diarization else "model.safetensors"
+    if not (project_root / "models" / "nemotron-3-diarization" / nemotron_weight).is_file():
+        return False, "Nemotron 화자 분리 모델이 준비되지 않았습니다. 모델 다운로드 스크립트를 다시 실행해 주세요."
+    if native_diarization and not _native_nemotron_binary(project_root):
+        return False, "Nemotron 화자 분리 실행기가 준비되지 않았습니다. Install-Dependencies 스크립트를 다시 실행해 주세요."
+    return True, None
+
+
+def _profile_payload(project_root: Path) -> list[dict[str, Any]]:
     return [
         {
             "key": profile.key,
             "label": profile.label,
             "description": profile.description,
             "requires_gpu": profile.requires_gpu,
+            "available": (availability := _profile_availability(project_root, profile))[0],
+            "unavailable_reason": availability[1],
         }
         for profile in WHISPER_PROFILES
     ]
@@ -96,9 +144,9 @@ def _index_page() -> str:
     <p class="hint">지원 형식: M4A, MP3, WAV, FLAC, AAC, OGG · 서버는 한 번에 하나의 작업만 처리합니다.</p>
     <form id="upload-form">
       <div class="grid"><div><label for="audio">음성 파일</label><input id="audio" name="file" type="file" accept=".m4a,.mp3,.wav,.flac,.aac,.ogg" required></div>
-      <div><label for="profile">전사 품질</label><select id="profile" name="profile"></select></div></div>
+      <div><label for="profile">전사 품질</label><select id="profile" name="profile" disabled></select><p id="profile-status" class="hint">서버의 준비된 모델을 확인하고 있습니다…</p></div></div>
       <label for="token">접근 토큰 <span class="hint">(SSH 터널 접속이면 비워 둡니다)</span></label><input id="token" type="password" autocomplete="off" placeholder="서버에서 토큰을 설정한 경우 입력">
-      <div class="actions"><button id="submit" type="submit">업로드하고 분석 시작</button><span id="upload-status" class="hint"></span></div>
+      <div class="actions"><button id="submit" type="submit" disabled>업로드하고 분석 시작</button><span id="upload-status" class="hint"></span></div>
     </form>
   </section>
   <section id="current" class="hidden">
@@ -108,7 +156,7 @@ def _index_page() -> str:
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null;
+  let activeId = null, events = null, polling = null, profiles = [];
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token").value.trim();
@@ -137,9 +185,26 @@ def _index_page() -> str:
     events.addEventListener("status", (event) => render(JSON.parse(event.data)));
     events.onerror = () => { events.close(); events = null; polling = setInterval(() => request(`/api/jobs/${id}`).then(render).catch(() => stopWatching()), 2000); };
   }
-  async function loadProfiles() { const data = await request("/api/profiles"); $("profile").innerHTML = data.profiles.map((profile) => `<option value="${escapeHtml(profile.key)}">${escapeHtml(profile.label)}</option>`).join(""); }
+  function updateProfileState() {
+    const selected = profiles.find((profile) => profile.key === $("profile").value);
+    const status = $("profile-status"), button = $("submit");
+    if (!selected) { status.textContent = "준비된 전사 모델이 없습니다. 모델을 준비한 뒤 이 페이지를 새로고침해 주세요."; status.className = "hint error"; button.disabled = true; return; }
+    status.textContent = selected.available ? selected.description : `준비 필요: ${selected.unavailable_reason}`;
+    status.className = selected.available ? "hint" : "hint error";
+    button.disabled = !selected.available;
+  }
+  async function loadProfiles() {
+    const data = await request("/api/profiles"); profiles = data.profiles;
+    const select = $("profile");
+    select.innerHTML = profiles.map((profile) => `<option value="${escapeHtml(profile.key)}"${profile.available ? "" : " disabled"}>${escapeHtml(profile.label)}${profile.available ? "" : " · 준비 필요"}</option>`).join("");
+    const preferred = profiles.find((profile) => profile.key === "turbo" && profile.available) || profiles.find((profile) => profile.available);
+    if (preferred) select.value = preferred.key;
+    select.disabled = !preferred;
+    updateProfileState();
+  }
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
-  $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { button.disabled = false; } });
+  $("profile").addEventListener("change", updateProfileState);
+  $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = profiles.find((profile) => profile.key === $("profile").value); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
   $("cancel").addEventListener("click", async () => { if (!activeId) return; try { render((await request(`/api/jobs/${activeId}/cancel`, {method:"POST"})).job); } catch (error) { $("current-notice").textContent = error.message; $("current-notice").classList.add("error"); } });
   Promise.all([loadProfiles(), loadJobs()]).catch((error) => { $("upload-status").textContent = error.message; });
 </script>
@@ -209,7 +274,7 @@ def create_app(
 
     @app.get("/api/profiles")
     def profiles(_: None = Depends(require_access)) -> dict[str, Any]:
-        return {"profiles": _profile_payload()}
+        return {"profiles": _profile_payload(project_root)}
 
     @app.get("/api/jobs")
     def jobs(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -221,6 +286,13 @@ def create_app(
         profile: Annotated[str, Form()] = "turbo",
         _: None = Depends(require_access),
     ) -> JSONResponse:
+        try:
+            profile_definition = next(item for item in WHISPER_PROFILES if item.key == profile)
+        except StopIteration:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="알 수 없는 Whisper 프로필입니다.") from None
+        available, reason = _profile_availability(project_root, profile_definition)
+        if not available:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=reason or "선택한 모델을 실행할 수 없습니다.")
         try:
             job = job_manager.create_upload_job(file.filename or "recording", profile)
         except ValueError as error:

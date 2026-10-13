@@ -85,7 +85,7 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 
 Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. NVIDIA GPU가 감지되면 설치 스크립트가 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 환경에 설치해 GPU `float16` 실행을 준비합니다. Small·Turbo는 GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환되지만, Large-v3는 GPU 전용입니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
 
-Whisper 실행용 모델은 `model.bin` 하나만으로 준비가 끝난 것이 아닙니다. `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`도 필요합니다. 현재 앱과 macOS·Linux 스크립트는 다섯 파일을 모두 확인하고, 일부만 빠진 경우에는 모델 전체를 다시 받지 않고 누락된 파일만 복구합니다. 업데이트 뒤 모델 관리 화면에서 다운로드 필요 상태가 보이면 **모델 다운로드 시작**을 누르거나 아래 명령을 실행하세요.
+Whisper 실행용 모델은 `model.bin` 하나만으로 준비가 끝난 것이 아닙니다. Turbo·Large-v3는 `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`을 함께 사용하며, Small의 공식 CTranslate2 모델은 `preprocessor_config.json` 대신 `vocabulary.txt`를 사용합니다. 앱과 macOS·Linux 스크립트는 선택한 모델에 맞는 파일 구성을 검사하고, 일부만 빠진 경우에는 모델 전체를 다시 받지 않고 누락된 파일만 복구합니다. 업데이트 뒤 모델 관리 화면에서 다운로드 필요 상태가 보이면 **모델 다운로드 시작**을 누르거나 아래 명령을 실행하세요.
 
 ```bash
 bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarization
@@ -149,6 +149,8 @@ TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
 ```
 
 웹 서버는 한 번에 하나의 분석 작업만 실행해 GPU·메모리 충돌을 피합니다. 업로드와 결과는 `outputs/jobs/`에 작업별로 보관하며, 서버를 시작할 때 기본 7일보다 오래된 작업 폴더를 정리합니다. `TALKTRACKER_WEB_MAX_UPLOAD_MB`(기본 2048MB), `TALKTRACKER_WEB_RETENTION_DAYS`(기본 7일), `TALKTRACKER_WEB_PORT`(기본 8080) 환경 변수로 조정할 수 있습니다.
+
+웹 화면에서는 이 PC에서 실제로 실행 가능한 전사 모델만 선택할 수 있습니다. 준비되지 않은 모델은 **준비 필요**로 비활성화되며, 직접 요청을 보내더라도 서버가 파일을 작업 대기열에 넣기 전에 거절합니다. 원하는 품질이 비활성화되어 있으면 해당 프로필로 `scripts/linux/Download-Models.sh --whisper-profile ...`를 실행한 뒤 브라우저를 새로고침하세요.
 
 ## 처리 순서
 

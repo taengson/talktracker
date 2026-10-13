@@ -7,8 +7,10 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
 from talktracker.core.jobs import JobManager
-from talktracker.server import _index_page
+from talktracker.server import _index_page, create_app
 
 
 class FakeResult:
@@ -118,6 +120,22 @@ class ServerPageTests(unittest.TestCase):
         self.assertNotIn('"\\\\\"":"&quot;"', page)
         self.assertIn('request("/api/profiles")', page)
         self.assertIn('event.preventDefault()', page)
+
+    def test_server_disables_missing_models_and_rejects_their_uploads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(create_app(project_root=Path(directory))) as client:
+                profiles = client.get("/api/profiles").json()["profiles"]
+                small = next(profile for profile in profiles if profile["key"] == "small")
+                self.assertFalse(small["available"])
+                self.assertIn("Whisper 모델이 준비되지 않았습니다", small["unavailable_reason"])
+
+                response = client.post(
+                    "/api/jobs",
+                    data={"profile": "small"},
+                    files={"file": ("meeting.m4a", b"recording", "audio/mp4")},
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("Whisper 모델이 준비되지 않았습니다", response.json()["detail"])
 
 
 if __name__ == "__main__":

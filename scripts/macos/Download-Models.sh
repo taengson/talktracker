@@ -60,17 +60,20 @@ case "$whisper_profile" in
     whisper_repository="Systran/faster-whisper-small"
     whisper_folder="whisper-small-ct2"
     whisper_display_name="Whisper Small (fast transcription)"
+    required_files=(config.json model.bin tokenizer.json vocabulary.txt)
     ;;
   turbo)
     # This is the CTranslate2 model used by faster-whisper for the Turbo alias.
     whisper_repository="mobiuslabsgmbh/faster-whisper-large-v3-turbo"
     whisper_folder="whisper-large-v3-turbo-ct2"
     whisper_display_name="Whisper Large-v3 Turbo (recommended)"
+    required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
     ;;
   large-v3)
     whisper_repository="Systran/faster-whisper-large-v3"
     whisper_folder="whisper-large-v3-ct2"
     whisper_display_name="Whisper Large-v3 (CUDA GPU required to run)"
+    required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
     ;;
   *)
     echo "Unknown Whisper profile: $whisper_profile" >&2
@@ -89,7 +92,6 @@ mkdir -p "$models_root"
 
 download_prepared_whisper() {
   local destination="$models_root/$whisper_folder"
-  local required_files=(config.json preprocessor_config.json model.bin tokenizer.json vocabulary.json)
   local missing_files=()
   local file
   for file in "${required_files[@]}"; do

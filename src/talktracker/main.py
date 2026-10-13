@@ -305,7 +305,7 @@ class TalkTrackerApp(tk.Tk):
             label
             for label, (location, weight_file) in self._model_locations().items()
             if (
-                bool(missing_whisper_runtime_files(location))
+                bool(missing_whisper_runtime_files(location, profile))
                 if label == whisper_label
                 else not (location / weight_file).is_file()
             )

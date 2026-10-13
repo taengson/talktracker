@@ -184,7 +184,7 @@ class AnalysisEngine:
             )
         whisper_directory = self.project_root / "models" / self.whisper_runtime.folder
         missing = []
-        missing_whisper_files = missing_whisper_runtime_files(whisper_directory)
+        missing_whisper_files = missing_whisper_runtime_files(whisper_directory, self.whisper_profile)
         if missing_whisper_files:
             missing.append(
                 f"{self.whisper_profile.short_label} Whisper 모델 ({', '.join(missing_whisper_files)} 없음)"

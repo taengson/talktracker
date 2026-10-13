@@ -84,7 +84,7 @@ TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
 
 macOS와 Linux는 다운로드한 모델이 곧바로 실행 가능한 CTranslate2 형식입니다. 기존 원본 Whisper 파일만 받아 둔 경우에는 각 운영체제의 `Prepare-FasterWhisper` 스크립트에 `--whisper-profile`을 지정해 준비된 모델만 받을 수 있습니다. Windows에서는 `-PrepareForLocalUse`를 다운로드 명령 끝에 붙여 변환까지 이어서 실행할 수 있습니다.
 
-macOS·Linux의 실행용 Whisper 폴더에는 `config.json`, `preprocessor_config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json`이 모두 있어야 합니다. `Download-Models.sh`와 `Prepare-FasterWhisper.sh`는 이 파일들을 모두 검사합니다. 일부 파일만 빠진 경우에는 이미 받은 큰 `model.bin`을 다시 받지 않고 누락 파일만 강제로 내려받은 뒤 다시 검사합니다.
+macOS·Linux의 실행용 Whisper 폴더는 모델마다 필요한 파일 구성이 다릅니다. Turbo·Large-v3는 `config.json`, `preprocessor_config.json`, `model.bin`, `tokenizer.json`, `vocabulary.json`을 사용하고, Small의 공식 CTranslate2 모델은 `config.json`, `model.bin`, `tokenizer.json`, `vocabulary.txt`를 사용합니다. `Download-Models.sh`와 `Prepare-FasterWhisper.sh`는 선택한 모델에 맞는 파일만 검사합니다. 일부 파일만 빠진 경우에는 이미 받은 큰 `model.bin`을 다시 받지 않고 누락 파일만 강제로 내려받은 뒤 다시 검사합니다.
 
 예를 들어 Linux Large-v3 폴더를 복구하면서 화자 분리 모델 다운로드를 건너뛰려면 다음을 실행합니다.
 
@@ -92,7 +92,7 @@ macOS·Linux의 실행용 Whisper 폴더에는 `config.json`, `preprocessor_conf
 bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarization
 ```
 
-완료 뒤 GUI의 **상태 새로고침**을 누릅니다. 앱도 같은 다섯 파일을 확인하므로 `model.bin`만 있는 불완전한 폴더를 준비 완료로 표시하지 않습니다.
+완료 뒤 GUI의 **상태 새로고침**을 누릅니다. 앱도 선택한 모델의 필수 파일을 확인하므로 `model.bin`만 있는 불완전한 폴더를 준비 완료로 표시하지 않습니다.
 
 Windows에서 모델 준비 대상을 직접 지정하려면 `Prepare-FasterWhisper.ps1`에 `-Runtime cpu`, `-Runtime cuda`, 또는 `-Runtime both`를 붙일 수 있습니다. Linux는 하나의 준비된 CTranslate2 모델을 CPU `int8`과 CUDA GPU `float16`에서 모두 사용하며, 앱이 실행 시 실제 CTranslate2 CUDA 가능 여부를 확인해 선택합니다.
 
