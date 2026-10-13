@@ -110,7 +110,7 @@ def _index_page() -> str:
 <script>
   let activeId = null, events = null, polling = null;
   const $ = (id) => document.getElementById(id);
-  const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[c]));
+  const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token").value.trim();
   const authHeaders = () => token() ? {"X-TalkTracker-Token": token()} : {};
   const apiUrl = (path, includeToken = false) => includeToken && token() ? `${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(token())}` : path;

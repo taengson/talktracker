@@ -8,6 +8,7 @@ from threading import Event
 from types import SimpleNamespace
 
 from talktracker.core.jobs import JobManager
+from talktracker.server import _index_page
 
 
 class FakeResult:
@@ -106,6 +107,17 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual(self._wait_for_terminal_state(first.id)["state"], "completed")
         self.assertEqual(self._wait_for_terminal_state(second.id)["state"], "completed")
         self.assertEqual(started_directories, [first.directory.name, second.directory.name])
+
+
+class ServerPageTests(unittest.TestCase):
+    def test_embedded_client_script_uses_a_valid_quote_key_for_html_escaping(self) -> None:
+        """Keep Python string escaping from corrupting the browser client."""
+
+        page = _index_page()
+        self.assertIn("'\"':\"&quot;\"", page)
+        self.assertNotIn('"\\\\\"":"&quot;"', page)
+        self.assertIn('request("/api/profiles")', page)
+        self.assertIn('event.preventDefault()', page)
 
 
 if __name__ == "__main__":
