@@ -300,6 +300,7 @@ class TalkTrackerApp(tk.Tk):
 
     def refresh_model_status(self) -> None:
         """Reflect whether the selected local transcription profile is ready to load."""
+        profile = self.selected_whisper_profile
         whisper_label = self._whisper_model_label()
         self.missing_models = [
             label

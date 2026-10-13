@@ -3,8 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from talktracker.core.models import get_whisper_profile, missing_whisper_runtime_files
+from talktracker.main import TalkTrackerApp
 
 
 class WhisperRuntimeFilesTests(unittest.TestCase):
@@ -37,6 +40,23 @@ class WhisperRuntimeFilesTests(unittest.TestCase):
                 missing_whisper_runtime_files(model_directory, profile),
                 ("preprocessor_config.json", "vocabulary.json"),
             )
+
+    def test_gui_model_status_uses_the_selected_profile(self) -> None:
+        """Model-state refresh must not prevent the desktop app from opening."""
+
+        with tempfile.TemporaryDirectory() as directory, patch("talktracker.main.USES_NATIVE_NEMOTRON", False):
+            app = TalkTrackerApp.__new__(TalkTrackerApp)
+            app.whisper_profile_key = SimpleNamespace(get=lambda: "small")
+            app._whisper_model_label = lambda: "빠른 전사 Whisper 전사 · CPU · INT8"
+            app._model_locations = lambda: {
+                app._whisper_model_label(): (Path(directory) / "whisper-small-ct2", "model.bin"),
+                "Nemotron 화자 분리": (Path(directory) / "nemotron", "model.safetensors"),
+            }
+            app.model_status_button = SimpleNamespace(configure=lambda **_kwargs: None)
+
+            app.refresh_model_status()
+
+            self.assertIn(app._whisper_model_label(), app.missing_models)
 
 
 if __name__ == "__main__":
