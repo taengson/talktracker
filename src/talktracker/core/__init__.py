@@ -1,6 +1,7 @@
 """Local audio-processing pipeline for TalkTracker."""
 
 from .analysis import AnalysisEngine, AnalysisResult, ProcessingError
+from .jobs import JobManager, JobNotFoundError, JobStateError
 from .models import (
     WHISPER_PROFILES,
     CudaRuntimeStatus,
@@ -17,6 +18,9 @@ __all__ = [
     "AnalysisEngine",
     "AnalysisResult",
     "ProcessingError",
+    "JobManager",
+    "JobNotFoundError",
+    "JobStateError",
     "WHISPER_PROFILES",
     "CudaRuntimeStatus",
     "WhisperProfile",

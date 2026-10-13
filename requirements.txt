@@ -14,3 +14,8 @@ faster-whisper
 # Keep the Python wheel and the optional Linux CUDA source build on the same
 # CTranslate2 release. faster-whisper accepts the 4.x series.
 ctranslate2==4.8.2
+# Local browser server mode. FastAPI receives multipart audio uploads and
+# Uvicorn serves the API and progress event stream.
+fastapi>=0.135,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.20,<1

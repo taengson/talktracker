@@ -49,6 +49,29 @@ Linux는 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받아 로�
 
 실제 Linux PC에서 설치·CPU 전사·CUDA 전사를 차례대로 확인하려면 [Linux 검증 가이드](../docs/linux-test-guide.md)를 사용하세요. 배포판에서 Python 3.11 또는 FFmpeg를 바로 제공하지 않는 경우의 확인 사항도 포함합니다.
 
+### Linux 웹 서버 실행
+
+Linux에서는 GUI 대신 브라우저 요청을 받는 서버 모드를 실행할 수 있습니다. `Install-Dependencies.sh`를 실행하면 웹 서버에 필요한 Python 패키지도 함께 설치됩니다.
+
+```bash
+bash scripts/linux/Run-Web.sh
+```
+
+기본 주소는 `127.0.0.1:8080`이므로 SSH 터널을 통해 다른 PC의 브라우저에서 안전하게 접속할 수 있습니다.
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@remote-host
+```
+
+로컬 네트워크에서 직접 접속하게 하려면 토큰을 설정하고 `--host 0.0.0.0`을 지정합니다. 외부 인터넷에 직접 공개하지 마세요.
+
+```bash
+TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
+  bash scripts/linux/Run-Web.sh --host 0.0.0.0
+```
+
+서버는 업로드 파일을 `outputs/jobs/` 아래에 작업별로 보관하고, GPU·메모리 충돌을 피하기 위해 분석을 한 번에 하나씩 처리합니다. 업로드 크기·보관 기간·포트는 `TALKTRACKER_WEB_MAX_UPLOAD_MB`, `TALKTRACKER_WEB_RETENTION_DAYS`, `TALKTRACKER_WEB_PORT` 환경 변수로 조정할 수 있습니다.
+
 ## 전사 품질 선택
 
 모델 다운로드와 준비 스크립트에는 같은 프로필을 지정합니다. 지정하지 않으면 권장 Turbo를 사용합니다.

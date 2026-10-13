@@ -1,6 +1,6 @@
 # TalkTracker
 
-로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 한 화면에서 정리하는 Windows·macOS·Linux용 데스크톱 프로그램입니다. 음성 파일과 분석 결과는 PC 밖으로 전송하지 않습니다.
+로컬 음성 파일에서 **누가 언제 말했는지**와 **무슨 말을 했는지**를 정리하는 Windows·macOS·Linux용 프로그램입니다. 데스크톱 화면은 세 운영체제에서 실행할 수 있고, Linux에서는 다른 PC의 브라우저 요청을 처리하는 웹 서버 모드도 제공합니다. 음성 파일과 분석 결과는 TalkTracker가 실행 중인 PC 안에서 처리합니다.
 
 > **운영체제 지원 범위:** Windows, macOS, Linux를 지원합니다. 설치·모델 다운로드·실행 스크립트는 각각 `scripts/windows`, `scripts/macos`, `scripts/linux`에 있습니다. macOS에서는 CPU 전사 프로필(빠른 전사·권장)을 사용합니다. Windows와 Linux는 CTranslate2 CUDA 실행 환경이 준비되어 있으면 GPU 전사를 자동 선택합니다. 최고 정확도 Large-v3는 CUDA GPU가 필요합니다.
 
@@ -16,6 +16,7 @@
 - 화자별 타임라인을 전사 중에도 먼저 표시
 - 경과 시간과 진행 상태 표시, Whisper 전사 중에는 처리된 녹음 시각 표시
 - 분석 중단 시, 실행 중인 네이티브 화자 분리 작업을 즉시 종료하고 그 시점까지 완성된 화자 구간과 전사 결과 유지
+- Linux 웹 서버 모드에서 브라우저 업로드, 단일 작업 대기열, 진행 상태·화자 타임라인, 중단, Markdown 결과 다운로드
 - 읽기 쉬운 Markdown 형식으로 결과 저장
 
 ## 현재 작업 상태
@@ -125,6 +126,29 @@ scp user@remote-host:~/talktracker-recordings/파일명.m4a ~/Downloads/
 대용량 파일을 여러 번 옮기거나 중단 후 이어받아야 하면 같은 경로에 `rsync -avP`를 사용할 수 있습니다.
 
 실제 Linux PC에서 설치와 CPU·CUDA 동작을 검증할 때는 [Linux 검증 가이드](docs/linux-test-guide.md)를 따르세요. 배포판별 Python 3.11·FFmpeg 저장소 차이와 기대 결과를 함께 정리했습니다.
+
+### Linux 웹 서버로 실행하기
+
+Linux GPU PC에서 모델을 준비한 뒤 다음 명령으로 웹 서버를 시작할 수 있습니다. 기본값은 서버 PC 내부에서만 접속할 수 있는 `127.0.0.1:8080`입니다.
+
+```bash
+bash scripts/linux/Run-Web.sh
+```
+
+다른 PC에서는 서버에 SSH 터널을 연 뒤 브라우저에서 `http://localhost:8080`으로 접속하세요.
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@remote-host
+```
+
+로컬 네트워크에 직접 열어야 한다면 접근 토큰을 설정해야 합니다. 서버 주소로 접속한 브라우저의 **접근 토큰** 칸에 같은 값을 입력합니다. 인터넷에 직접 공개하는 용도로는 사용하지 마세요.
+
+```bash
+TALKTRACKER_WEB_TOKEN='길고_임의적인_비밀값' \
+  bash scripts/linux/Run-Web.sh --host 0.0.0.0
+```
+
+웹 서버는 한 번에 하나의 분석 작업만 실행해 GPU·메모리 충돌을 피합니다. 업로드와 결과는 `outputs/jobs/`에 작업별로 보관하며, 서버를 시작할 때 기본 7일보다 오래된 작업 폴더를 정리합니다. `TALKTRACKER_WEB_MAX_UPLOAD_MB`(기본 2048MB), `TALKTRACKER_WEB_RETENTION_DAYS`(기본 7일), `TALKTRACKER_WEB_PORT`(기본 8080) 환경 변수로 조정할 수 있습니다.
 
 ## 처리 순서
 
