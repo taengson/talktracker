@@ -43,7 +43,7 @@
 
 모델은 프로젝트의 `models` 폴더에 저장됩니다. 화면에서 전사 품질을 고르면 그 선택에 맞는 모델만 준비 메뉴에서 내려받아 사용할 수 있습니다.
 
-> **Windows·Linux CUDA GPU 사용:** 모델 준비 스크립트는 CTranslate2가 CUDA GPU를 사용할 수 있으면 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. NVIDIA 드라이버가 필요하며, Linux 설치 스크립트는 GPU를 감지하면 필요한 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 `.venv`에 자동으로 설치하고 실행 환경을 설정합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
+> **Windows·Linux CUDA GPU 사용:** Windows는 CTranslate2가 CUDA GPU를 사용할 수 있으면 Small·Turbo용 CPU `int8` 대체 모델과 GPU `float16` 모델을 함께 준비합니다. Linux는 준비된 CTranslate2 모델 하나를 GPU `float16`과 CPU `int8`에 함께 사용합니다. NVIDIA 드라이버가 필요하며, Linux 설치 스크립트는 GPU를 감지하면 필요한 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 `.venv`에 자동으로 설치하고 실행 환경을 설정합니다. Linux ARM64에서 PyPI가 CPU 전용 CTranslate2를 제공하면 설치 스크립트가 프로젝트 내부에서 CUDA용 바인딩을 한 번 빌드합니다.
 
 ## macOS에서 실행하기
 
@@ -84,7 +84,7 @@ Ubuntu·Debian·Fedora·Arch 계열의 패키지 관리자를 감지해 Python 3
 
 Linux는 로컬 PyTorch 변환 없이 CTranslate2 형식으로 준비된 Whisper 모델을 직접 받습니다. NVIDIA GPU가 감지되면 설치 스크립트가 CUDA 12 cuBLAS·cuDNN 9 런타임을 프로젝트 환경에 설치해 GPU `float16` 실행을 준비합니다. Small·Turbo는 GPU 로드·전사 실패 시 CPU `int8`으로 자동 전환되지만, Large-v3는 GPU 전용입니다. 화자 분리는 Nemotron GGUF와 프로젝트 내부의 네이티브 실행기를 사용합니다.
 
-Whisper 실행용 모델은 `model.bin` 하나만으로 준비가 끝난 것이 아닙니다. `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`도 필요합니다. 현재 앱과 Linux 스크립트는 다섯 파일을 모두 확인하고, 일부만 빠진 경우에는 모델 전체를 다시 받지 않고 누락된 파일만 복구합니다. 업데이트 뒤 모델 관리 화면에서 다운로드 필요 상태가 보이면 **모델 다운로드 시작**을 누르거나 아래 명령을 실행하세요.
+Whisper 실행용 모델은 `model.bin` 하나만으로 준비가 끝난 것이 아닙니다. `config.json`, `preprocessor_config.json`, `tokenizer.json`, `vocabulary.json`도 필요합니다. 현재 앱과 macOS·Linux 스크립트는 다섯 파일을 모두 확인하고, 일부만 빠진 경우에는 모델 전체를 다시 받지 않고 누락된 파일만 복구합니다. 업데이트 뒤 모델 관리 화면에서 다운로드 필요 상태가 보이면 **모델 다운로드 시작**을 누르거나 아래 명령을 실행하세요.
 
 ```bash
 bash scripts/linux/Download-Models.sh --whisper-profile large-v3 --skip-diarization
@@ -141,4 +141,5 @@ scp user@remote-host:~/talktracker-recordings/파일명.m4a ~/Downloads/
 - [웹 서버 모드 구현 계획](docs/web-server-plan.md)
 - [현재 구현 상태와 검증 메모](docs/implementation-status.md)
 - [Linux 검증 가이드](docs/linux-test-guide.md)
+- [로컬 모델 저장소 안내](models/README.md)
 - [스크립트 안내](scripts/README.md)
