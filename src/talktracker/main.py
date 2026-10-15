@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from tkinter import filedialog, messagebox, ttk
 
+from .core.llm_client import LocalLLMError, LocalLLMModel
+from .core.workflow import LocalLLMConnectionManager
 from .core.models import (
     WHISPER_PROFILES,
     WhisperProfile,
@@ -92,6 +94,10 @@ class TalkTrackerApp(tk.Tk):
         self.model_setup_stage = tk.StringVar()
         self.model_setup_log: tk.Text | None = None
         self.model_setup_progress: ttk.Progressbar | None = None
+        self.llm_connection_manager = LocalLLMConnectionManager()
+        self.llm_connection_events: Queue[tuple[str, Any]] = Queue()
+        self.llm_connection_operation_active = False
+        self.llm_connection_dialog: tk.Toplevel | None = None
         self.whisper_profile_key = tk.StringVar(value="turbo")
         self._profile_by_label = {profile.label: profile for profile in WHISPER_PROFILES}
         self.whisper_profile_label = tk.StringVar(value=get_whisper_profile("turbo").label)
@@ -110,6 +116,7 @@ class TalkTrackerApp(tk.Tk):
         self._configure_styles()
         self._build_layout()
         self.refresh_model_status()
+        self.refresh_llm_connection_status()
         self._draw_timeline(empty=True)
 
     def _configure_styles(self) -> None:
@@ -249,8 +256,28 @@ class TalkTrackerApp(tk.Tk):
             font=("Segoe UI", 16, "bold"),
         ).pack(side="left")
 
+        status_actions = tk.Frame(header, bg=self.GROUND)
+        status_actions.grid(row=0, column=1, sticky="e")
+
+        self.llm_status_button = tk.Button(
+            status_actions,
+            text="●  로컬 AI 연결 필요",
+            command=self.open_llm_connection_manager,
+            bg="#FFF1E4",
+            fg="#99601C",
+            font=("Segoe UI", 9, "bold"),
+            padx=11,
+            pady=6,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            activebackground="#FFE5CA",
+            activeforeground="#99601C",
+        )
+        self.llm_status_button.pack(side="left", padx=(0, 8))
+
         self.model_status_button = tk.Button(
-            header,
+            status_actions,
             text="●  로컬 모델 확인 중",
             command=self.open_model_manager,
             bg="#E8F6F0",
@@ -264,7 +291,7 @@ class TalkTrackerApp(tk.Tk):
             activebackground="#DDF1E8",
             activeforeground=self.SUCCESS,
         )
-        self.model_status_button.grid(row=0, column=1, sticky="e")
+        self.model_status_button.pack(side="left")
 
     @property
     def selected_whisper_profile(self) -> WhisperProfile:
@@ -330,6 +357,213 @@ class TalkTrackerApp(tk.Tk):
             activebackground="#DDF1E8",
             activeforeground=self.SUCCESS,
         )
+
+    def refresh_llm_connection_status(self) -> None:
+        """Reflect the non-secret local LLM state without probing the server."""
+
+        state = self.llm_connection_manager.snapshot()
+        if state.connected:
+            self.llm_status_button.configure(
+                text=f"●  로컬 AI 연결됨 · {state.settings.model}",
+                bg="#E8F6F0",
+                fg=self.SUCCESS,
+                activebackground="#DDF1E8",
+                activeforeground=self.SUCCESS,
+            )
+            return
+        if state.settings.is_configured:
+            self.llm_status_button.configure(
+                text=f"●  로컬 AI 확인 필요 · {state.settings.model}",
+                bg="#FFF1E4",
+                fg="#99601C",
+                activebackground="#FFE5CA",
+                activeforeground="#99601C",
+            )
+            return
+        self.llm_status_button.configure(
+            text="●  로컬 AI 연결 필요",
+            bg="#F0F3F3",
+            fg=self.MUTED,
+            activebackground="#E3EBE9",
+            activeforeground=self.MUTED,
+        )
+
+    def open_llm_connection_manager(self) -> None:
+        """Configure and verify a loopback OpenAI-compatible local LLM server."""
+
+        existing = self.llm_connection_dialog
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        saved = self.llm_connection_manager.snapshot().settings
+        dialog = tk.Toplevel(self)
+        self.llm_connection_dialog = dialog
+        dialog.title("로컬 AI 연결")
+        dialog.resizable(False, False)
+        dialog.configure(bg=self.GROUND)
+        dialog.transient(self)
+        self._center_dialog_over_app(dialog, 610, 445)
+
+        url_value = tk.StringVar(value=saved.base_url or "http://127.0.0.1:8000")
+        api_key_value = tk.StringVar()
+        model_value = tk.StringVar(value=saved.model)
+        status_value = tk.StringVar(
+            value=(
+                "같은 PC에서 실행 중인 OpenAI 호환 로컬 AI 서버에 연결합니다."
+                if not saved.is_configured
+                else "저장된 주소와 모델을 불러왔습니다. 연결 확인을 눌러 현재 상태를 점검하세요."
+            )
+        )
+
+        header = tk.Frame(dialog, bg=self.GROUND)
+        header.pack(fill="x", padx=24, pady=(22, 10))
+        tk.Label(header, text="로컬 AI 연결", bg=self.GROUND, fg=self.NAVY, font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        tk.Label(
+            header,
+            text="LLM 서버는 별도로 실행해야 합니다. 서버 주소와 모델 ID만 저장하며 API 키는 이번 실행 중에만 사용합니다.",
+            bg=self.GROUND,
+            fg=self.MUTED,
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=555,
+        ).pack(anchor="w", pady=(5, 0))
+
+        form = self._card(dialog)
+        form.pack(fill="x", padx=24, pady=(0, 12))
+        form.grid_columnconfigure(1, weight=1)
+
+        def add_field(row: int, label: str, variable: tk.StringVar, *, secret: bool = False) -> ttk.Entry:
+            tk.Label(form, text=label, bg=self.PAPER, fg=self.INK, font=("Segoe UI", 9, "bold")).grid(
+                row=row, column=0, sticky="w", padx=(16, 12), pady=8
+            )
+            entry = ttk.Entry(form, textvariable=variable, width=55, show="•" if secret else "")
+            entry.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=8)
+            return entry
+
+        add_field(0, "서버 주소", url_value)
+        add_field(1, "API 키 (선택)", api_key_value, secret=True)
+        tk.Label(form, text="모델", bg=self.PAPER, fg=self.INK, font=("Segoe UI", 9, "bold")).grid(
+            row=2, column=0, sticky="w", padx=(16, 12), pady=8
+        )
+        model_box = ttk.Combobox(form, textvariable=model_value, width=52, state="normal")
+        model_box.grid(row=2, column=1, sticky="ew", padx=(0, 16), pady=8)
+        tk.Label(
+            form,
+            text="모델 목록을 제공하지 않는 서버는 모델 ID를 직접 입력할 수 있습니다.",
+            bg=self.PAPER,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+        ).grid(row=3, column=1, sticky="w", padx=(0, 16), pady=(0, 12))
+
+        status_label = tk.Label(
+            dialog,
+            textvariable=status_value,
+            bg="#E8F6F0",
+            fg=self.TEAL_DARK,
+            font=("Segoe UI", 9),
+            justify="left",
+            anchor="w",
+            padx=14,
+            pady=10,
+            wraplength=555,
+        )
+        status_label.pack(fill="x", padx=24, pady=(0, 12))
+
+        actions = tk.Frame(dialog, bg=self.GROUND)
+        actions.pack(fill="x", padx=24, pady=(0, 22))
+        actions.grid_columnconfigure(0, weight=1)
+        buttons = tk.Frame(actions, bg=self.GROUND)
+        buttons.grid(row=0, column=1, sticky="e")
+
+        load_button = self._button(buttons, "모델 불러오기", lambda: None, width=13)
+        load_button.pack(side="left", padx=(0, 8))
+        test_button = self._button(buttons, "연결 확인", lambda: None, primary=True, width=11)
+        test_button.pack(side="left", padx=(0, 8))
+        self._button(buttons, "닫기", dialog.destroy, width=8).pack(side="left")
+
+        def set_busy(value: bool) -> None:
+            state = "disabled" if value else "normal"
+            load_button.configure(state=state)
+            test_button.configure(state=state)
+            model_box.configure(state="disabled" if value else "normal")
+
+        def start_operation(operation: str) -> None:
+            if self.llm_connection_operation_active:
+                return
+            base_url = url_value.get()
+            api_key = api_key_value.get()
+            model = model_value.get().strip()
+            if operation == "test" and not model:
+                status_value.set("연결을 확인할 모델 ID를 선택하거나 직접 입력해 주세요.")
+                status_label.configure(bg="#FFF1E4", fg="#99601C")
+                return
+            self.llm_connection_operation_active = True
+            set_busy(True)
+            status_value.set("모델 목록을 읽고 있습니다…" if operation == "models" else "선택한 모델에 짧은 연결 요청을 보내고 있습니다…")
+            status_label.configure(bg="#E8F6F0", fg=self.TEAL_DARK)
+
+            def worker() -> None:
+                try:
+                    if operation == "models":
+                        self.llm_connection_events.put(("models", dialog, self.llm_connection_manager.list_models(base_url, api_key)))
+                    else:
+                        self.llm_connection_events.put(
+                            ("verified", dialog, self.llm_connection_manager.verify(base_url, api_key, model))
+                        )
+                except LocalLLMError as error:
+                    self.llm_connection_events.put(("error", dialog, str(error)))
+                except Exception:
+                    self.llm_connection_events.put(("error", dialog, "로컬 AI 연결을 확인하는 중 예상하지 못한 오류가 발생했습니다."))
+
+            Thread(target=worker, name="talktracker-local-llm-check", daemon=True).start()
+            self.after(80, poll_events)
+
+        def poll_events() -> None:
+            processed = False
+            while True:
+                try:
+                    event, target_dialog, payload = self.llm_connection_events.get_nowait()
+                except Empty:
+                    break
+                processed = True
+                self.llm_connection_operation_active = False
+                if target_dialog.winfo_exists():
+                    set_busy(False)
+                    if event == "models":
+                        models = payload
+                        assert isinstance(models, list)
+                        model_ids = [item.id for item in models if isinstance(item, LocalLLMModel)]
+                        model_box.configure(values=model_ids)
+                        if model_ids and model_value.get().strip() not in model_ids:
+                            model_value.set(model_ids[0])
+                        status_value.set(
+                            f"모델 {len(model_ids)}개를 불러왔습니다. 사용할 모델을 고른 뒤 연결 확인을 눌러 주세요."
+                            if model_ids
+                            else "서버가 모델 목록을 비워서 반환했습니다. 모델 ID를 직접 입력한 뒤 연결 확인을 눌러 주세요."
+                        )
+                        status_label.configure(bg="#E8F6F0", fg=self.TEAL_DARK)
+                    elif event == "verified":
+                        preview = getattr(payload, "response_preview", "")
+                        suffix = f" 응답: {preview}" if preview else ""
+                        status_value.set(f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.{suffix}")
+                        status_label.configure(bg="#E8F6F0", fg=self.SUCCESS)
+                        self.refresh_llm_connection_status()
+                    else:
+                        self.llm_connection_manager.mark_disconnected()
+                        status_value.set(str(payload))
+                        status_label.configure(bg="#FFF1E4", fg="#99601C")
+                        self.refresh_llm_connection_status()
+            if self.llm_connection_operation_active:
+                self.after(80, poll_events)
+            elif processed:
+                self.update_idletasks()
+
+        load_button.configure(command=lambda: start_operation("models"))
+        test_button.configure(command=lambda: start_operation("test"))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
 
     def open_model_manager(self) -> None:
         """Show local model state and offer the existing setup scripts."""

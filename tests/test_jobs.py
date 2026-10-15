@@ -11,7 +11,10 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from talktracker.core.jobs import JobManager
+from talktracker.core.llm_client import LocalLLMConnection, LocalLLMConnectionTest, LocalLLMModel
+from talktracker.core.llm_config import LocalLLMSettingsStore
 from talktracker.core.models import get_whisper_profile
+from talktracker.core.workflow import LocalLLMConnectionManager
 from talktracker.server import _index_page, _model_download_command, create_app, main as server_main
 
 
@@ -29,6 +32,17 @@ class FakeEngine:
         on_diarization([SimpleNamespace(start=0.0, end=2.5, speaker="화자 1")], 2.5)
         progress(80, "음성을 전사하고 있습니다.")
         return FakeResult()
+
+
+class FakeLocalLLMClient:
+    def __init__(self, connection: LocalLLMConnection) -> None:
+        self.connection = connection
+
+    def list_models(self) -> list[LocalLLMModel]:
+        return [LocalLLMModel(id="talktracker-test", owned_by="local")]
+
+    def test_connection(self, model: str) -> LocalLLMConnectionTest:
+        return LocalLLMConnectionTest(model=model, response_preview="OK")
 
 
 class JobManagerTests(unittest.TestCase):
@@ -156,11 +170,57 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('function renderTimeline(segments, durationSeconds)', page)
         self.assertIn('class="speaker-lane"', page)
         self.assertIn('id="server-setup"', page)
+        self.assertIn('id="local-ai"', page)
+        self.assertIn('/api/local-llm/verify', page)
+        self.assertIn('id="llm-api-key"', page)
         self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
         protected_page = _index_page(access_token_required=True)
         self.assertIn('id="token"', protected_page)
         self.assertIn('refreshProtectedData', protected_page)
+        network_page = _index_page(local_llm_available=False)
+        self.assertNotIn('id="local-ai"', network_page)
+        self.assertNotIn('id="llm-api-key"', network_page)
+
+    def test_local_llm_api_lists_and_verifies_without_persisting_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings_path = root / "settings" / "local-llm.json"
+            llm_manager = LocalLLMConnectionManager(
+                settings_store=LocalLLMSettingsStore(settings_path),
+                client_factory=FakeLocalLLMClient,
+            )
+            with TestClient(create_app(project_root=root, llm_connection_manager=llm_manager)) as client:
+                self.assertFalse(client.get("/api/local-llm").json()["configured"])
+                models = client.post(
+                    "/api/local-llm/models",
+                    json={"base_url": "http://localhost:11434", "api_key": "temporary-secret"},
+                )
+                self.assertEqual(models.status_code, 200)
+                self.assertEqual(models.json()["models"], [{"id": "talktracker-test", "owned_by": "local"}])
+
+                verified = client.post(
+                    "/api/local-llm/verify",
+                    json={"base_url": "http://localhost:11434", "api_key": "temporary-secret", "model": "talktracker-test"},
+                )
+                self.assertEqual(verified.status_code, 200)
+                self.assertTrue(verified.json()["connected"])
+                self.assertEqual(verified.json()["model"], "talktracker-test")
+
+                rejected = client.post(
+                    "/api/local-llm/models",
+                    json={"base_url": "http://example.com:8000", "api_key": "temporary-secret"},
+                )
+                self.assertEqual(rejected.status_code, 422)
+
+                malformed = client.post(
+                    "/api/local-llm/models",
+                    json={"base_url": 42, "api_key": "temporary-secret"},
+                )
+                self.assertEqual(malformed.status_code, 422)
+                self.assertNotIn("temporary-secret", malformed.text)
+
+            self.assertNotIn("temporary-secret", settings_path.read_text(encoding="utf-8"))
 
     def test_server_disables_missing_models_and_rejects_their_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

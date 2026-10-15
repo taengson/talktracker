@@ -24,6 +24,8 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from .core.jobs import JobManager, JobNotFoundError, JobStateError
+from .core.llm_client import LocalLLMError
+from .core.workflow import LocalLLMConnectionManager
 from .core.models import (
     WHISPER_PROFILES,
     WhisperProfile,
@@ -39,6 +41,26 @@ DEFAULT_PORT = 8080
 DEFAULT_MAX_UPLOAD_MB = 2048
 DEFAULT_RETENTION_DAYS = 7
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_local_llm_request(request: Request, *, require_model: bool) -> tuple[str, str, str]:
+    """Read transient connection input without reflecting API keys in errors."""
+
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="로컬 AI 연결 입력 형식이 올바르지 않습니다.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="로컬 AI 연결 입력 형식이 올바르지 않습니다.")
+
+    base_url = payload.get("base_url", "")
+    api_key = payload.get("api_key", "")
+    model = payload.get("model", "")
+    if not isinstance(base_url, str) or not isinstance(api_key, str) or not isinstance(model, str):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="로컬 AI 연결 입력 형식이 올바르지 않습니다.")
+    if require_model and not model.strip():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="연결을 확인할 모델 ID를 입력하거나 선택해 주세요.")
+    return base_url, api_key, model
 
 
 def _integer_setting(name: str, default: int, *, minimum: int) -> int:
@@ -160,7 +182,7 @@ def _server_unavailable_page() -> str:
 </body></html>"""
 
 
-def _index_page(*, access_token_required: bool = False) -> str:
+def _index_page(*, access_token_required: bool = False, local_llm_available: bool = True) -> str:
     """Keep the initial client self-contained; no frontend build is required."""
 
     page = """<!doctype html>
@@ -191,6 +213,7 @@ def _index_page(*, access_token_required: bool = False) -> str:
 <body>
 <header><div><h1>TalkTracker 서버</h1><p>이 서버 PC에서 화자 분리와 전사를 처리합니다.</p></div></header>
 <main>
+  __LOCAL_LLM_SECTION__
   <section>
     <h2>새 분석 요청</h2>
     <p class="hint">지원 형식: M4A, MP3, WAV, FLAC, AAC, OGG · 서버는 한 번에 하나의 작업만 처리합니다.</p>
@@ -276,6 +299,43 @@ def _index_page(*, access_token_required: bool = False) -> str:
     status.className = selected.available ? "hint" : "hint error";
     button.disabled = !selected.available;
   }
+  function setLlmStatus(message, isError = false) { const status = $("llm-status"); status.textContent = message; status.classList.toggle("error", isError); }
+  function llmInput(includeModel = false) {
+    const input = {base_url: $("llm-url").value.trim(), api_key: $("llm-api-key").value};
+    if (includeModel) { input.model = $("llm-model").value.trim(); if (!input.model) throw new Error("연결을 확인할 모델을 선택하거나 직접 입력해 주세요."); }
+    return input;
+  }
+  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; }
+  async function loadLlmConnection() {
+    try {
+      const connection = await request("/api/local-llm");
+      if (connection.base_url) $("llm-url").value = connection.base_url;
+      else if (!$("llm-url").value) $("llm-url").value = "http://127.0.0.1:8000";
+      if (connection.model) $("llm-model").value = connection.model;
+      setLlmStatus(connection.message, false);
+    } catch (error) { setLlmStatus(error.message, true); }
+  }
+  async function loadLlmModels() {
+    setLlmBusy(true); setLlmStatus("모델 목록을 읽고 있습니다…");
+    try {
+      const data = await request("/api/local-llm/models", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(llmInput())});
+      const ids = data.models.map((model) => model.id);
+      $("llm-model-options").innerHTML = ids.map((id) => `<option value="${escapeHtml(id)}">`).join("");
+      if (ids.length && !ids.includes($("llm-model").value.trim())) $("llm-model").value = ids[0];
+      setLlmStatus(ids.length ? `모델 ${ids.length}개를 불러왔습니다. 사용할 모델을 고른 뒤 연결 확인을 눌러 주세요.` : "서버가 모델 목록을 비워서 반환했습니다. 모델 ID를 직접 입력해 주세요.");
+    } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
+  }
+  async function verifyLlmConnection() {
+    let input;
+    try { input = llmInput(true); } catch (error) { setLlmStatus(error.message, true); return; }
+    setLlmBusy(true); setLlmStatus("선택한 모델에 짧은 연결 요청을 보내고 있습니다…");
+    try {
+      const connection = await request("/api/local-llm/verify", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)});
+      const suffix = connection.response_preview ? ` 응답: ${connection.response_preview}` : "";
+      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.${suffix}`);
+      $("llm-api-key").value = "";
+    } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
+  }
   async function loadProfiles() {
     const data = await request("/api/profiles"); profiles = data.profiles;
     const select = $("profile");
@@ -292,17 +352,30 @@ def _index_page(*, access_token_required: bool = False) -> str:
   }
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
   $("profile").addEventListener("change", updateProfileState);
+  $("llm-load-models")?.addEventListener("click", loadLlmModels);
+  $("llm-verify")?.addEventListener("click", verifyLlmConnection);
   $("token")?.addEventListener("change", refreshProtectedData);
   $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = profiles.find((profile) => profile.key === $("profile").value); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
   $("cancel").addEventListener("click", async () => { if (!activeId) return; try { render((await request(`/api/jobs/${activeId}/cancel`, {method:"POST"})).job); } catch (error) { $("current-notice").textContent = error.message; $("current-notice").classList.add("error"); } });
-  Promise.all([loadProfiles(), loadJobs()]).catch((error) => { $("upload-status").textContent = error.message; });
+  Promise.all([loadProfiles(), loadJobs(), $("local-ai") ? loadLlmConnection() : Promise.resolve()]).catch((error) => { $("upload-status").textContent = error.message; });
 </script>
 </body></html>"""
+    local_llm_section = """
+  <section id="local-ai">
+    <h2>로컬 AI 연결</h2>
+    <p class="hint">이 서버 PC에서 실행 중인 OpenAI 호환 로컬 AI 서버에만 연결합니다. 서버 주소와 모델만 저장하며 API 키는 이번 연결 확인에만 사용합니다.</p>
+    <div class="grid"><div><label for="llm-url">서버 주소</label><input id="llm-url" type="text" inputmode="url" placeholder="http://127.0.0.1:8000"></div>
+    <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
+    <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
+    <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
+    <p id="llm-status" class="notice">로컬 AI 연결 상태를 확인하고 있습니다…</p>
+  </section>
+    """ if local_llm_available else ""
     token_section = """
       <label for="token">접근 토큰</label><input id="token" type="password" autocomplete="off" placeholder="서버에 설정한 토큰을 입력한 뒤 다른 곳을 클릭하세요">
       <p class="hint">이 서버는 로컬 네트워크에 열려 있어 접근 토큰이 필요합니다.</p>
     """ if access_token_required else ""
-    return page.replace("__ACCESS_TOKEN_SECTION__", token_section)
+    return page.replace("__LOCAL_LLM_SECTION__", local_llm_section).replace("__ACCESS_TOKEN_SECTION__", token_section)
 
 
 def create_app(
@@ -312,6 +385,8 @@ def create_app(
     max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB,
     retention_days: int = DEFAULT_RETENTION_DAYS,
     manager: JobManager | None = None,
+    llm_connection_manager: LocalLLMConnectionManager | None = None,
+    local_llm_enabled: bool = True,
 ) -> FastAPI:
     """Create a server application without importing the Tkinter GUI."""
 
@@ -321,6 +396,7 @@ def create_app(
         raise ValueError("결과 보관 기간은 하루 이상이어야 합니다.")
     token = (access_token or "").strip() or None
     job_manager = manager or JobManager(project_root)
+    local_llm_manager = llm_connection_manager or LocalLLMConnectionManager()
     job_manager.cleanup_expired(retention_days)
 
     @asynccontextmanager
@@ -330,6 +406,8 @@ def create_app(
 
     app = FastAPI(title="TalkTracker Server", version="0.1.0", lifespan=lifespan)
     app.state.job_manager = job_manager
+    app.state.local_llm_manager = local_llm_manager
+    app.state.local_llm_enabled = local_llm_enabled
     app.state.access_token_required = bool(token)
     app.state.max_upload_bytes = max_upload_mb * 1024 * 1024
 
@@ -343,6 +421,10 @@ def create_app(
         if not hmac.compare_digest(candidate, token):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="접근 토큰이 필요합니다.")
 
+    def require_local_llm() -> None:
+        if not local_llm_enabled:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="로컬 AI 연결은 이 PC에서 연 웹 화면에서만 사용할 수 있습니다.")
+
     def snapshot_or_404(job_id: str) -> dict[str, Any]:
         try:
             return job_manager.snapshot(job_id)
@@ -354,7 +436,7 @@ def create_app(
         profiles = _profile_payload(project_root)
         if not any(profile["available"] for profile in profiles):
             return _server_unavailable_page()
-        return _index_page(access_token_required=bool(token))
+        return _index_page(access_token_required=bool(token), local_llm_available=local_llm_enabled)
 
     @app.get("/api/health")
     def health(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -372,6 +454,52 @@ def create_app(
     @app.get("/api/profiles")
     def profiles(_: None = Depends(require_access)) -> dict[str, Any]:
         return {"profiles": _profile_payload(project_root)}
+
+    @app.get("/api/local-llm")
+    def local_llm_status(_: None = Depends(require_access), _local: None = Depends(require_local_llm)) -> dict[str, Any]:
+        connection = local_llm_manager.snapshot()
+        return {
+            "configured": connection.settings.is_configured,
+            "connected": connection.connected,
+            "message": connection.message,
+            "base_url": connection.settings.base_url,
+            "model": connection.settings.model,
+        }
+
+    @app.post("/api/local-llm/models")
+    async def local_llm_models(
+        request: Request,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
+        base_url, api_key, _model = await _read_local_llm_request(request, require_model=False)
+        try:
+            models = local_llm_manager.list_models(base_url, api_key)
+        except LocalLLMError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
+        return {"models": [{"id": model.id, "owned_by": model.owned_by} for model in models]}
+
+    @app.post("/api/local-llm/verify")
+    async def verify_local_llm(
+        request: Request,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
+        base_url, api_key, model = await _read_local_llm_request(request, require_model=True)
+        try:
+            result = local_llm_manager.verify(base_url, api_key, model)
+        except LocalLLMError as error:
+            local_llm_manager.mark_disconnected()
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
+        connection = local_llm_manager.snapshot()
+        return {
+            "configured": connection.settings.is_configured,
+            "connected": connection.connected,
+            "message": connection.message,
+            "base_url": connection.settings.base_url,
+            "model": result.model,
+            "response_preview": result.response_preview,
+        }
 
     @app.get("/api/jobs")
     def jobs(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -517,6 +645,7 @@ def main() -> None:
         access_token=access_token,
         max_upload_mb=arguments.max_upload_mb,
         retention_days=arguments.retention_days,
+        local_llm_enabled=_is_loopback_host(arguments.host),
     )
     uvicorn.run(app, host=arguments.host, port=arguments.port, log_level="info")
 
