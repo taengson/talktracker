@@ -229,6 +229,13 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('/ai-refinement/cancel', page)
         self.assertNotIn('id="ai-original"', page)
         self.assertIn("원본 전사는 분석 결과로 자동 보존됩니다.", page)
+        self.assertIn('id="ai-original-transcript"', page)
+        self.assertIn("AI에 전달할 원본입니다.", page)
+        self.assertIn('id="profile-options"', page)
+        self.assertIn('input[name="profile"]', page)
+        self.assertNotIn('<select id="profile"', page)
+        self.assertIn("표시 이름 · 예: 화자 A", page)
+        self.assertNotIn("표시 이름 · 예: 손태영", page)
         self.assertIn("AI_RESULT_LABELS", page)
         self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
@@ -240,7 +247,7 @@ class ServerPageTests(unittest.TestCase):
         self.assertNotIn('id="llm-api-key"', network_page)
         closed_network_page = _index_page(local_llm_over_network=True)
         self.assertIn('id="local-ai"', closed_network_page)
-        self.assertIn("사내 폐쇄망 모드입니다.", closed_network_page)
+        self.assertIn("로컬 연결 허용 모드입니다.", closed_network_page)
         self.assertIn("API 키와 AI 요청은 네트워크를 통해 서버로 전달됩니다.", closed_network_page)
 
     def test_local_llm_api_lists_and_verifies_without_persisting_api_key(self) -> None:
@@ -310,6 +317,10 @@ class ServerPageTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(manager.snapshot(job.id)["state"], "completed")
                 with TestClient(create_app(project_root=root, manager=manager, llm_connection_manager=llm_manager)) as client:
+                    before_ai = client.get(f"/api/jobs/{job.id}/ai-refinement")
+                    self.assertEqual(before_ai.status_code, 200)
+                    self.assertIsNone(before_ai.json()["result"])
+                    self.assertIn("다음주 까지 초안 준비 할게요", before_ai.json()["original_transcript"])
                     verified = client.post(
                         "/api/local-llm/verify",
                         json={"base_url": "http://localhost:11434", "api_key": "temporary-secret", "model": "talktracker-test"},

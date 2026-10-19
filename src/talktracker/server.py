@@ -142,6 +142,7 @@ def _refinement_payload(
         "elapsed_seconds": elapsed_seconds,
         "error": state.error,
         "owner_id": state.owner_id,
+        "original_transcript": render_original_conversation(analysis),
         "result": None,
     }
     result = stored_result or state.result
@@ -305,11 +306,13 @@ def _index_page(
     input, select, textarea, button { min-height:38px; border:1px solid #aac4bf; border-radius:7px; font:inherit; } input, select, textarea { width:100%; padding:7px 9px; background:#fff; } textarea { min-height:86px; resize:vertical; }
     button { padding:7px 15px; cursor:pointer; color:#fff; border-color:var(--teal); background:var(--teal); font-weight:700; }
     button.secondary { color:var(--ink); background:#fff; border-color:#a9bbb7; } button.danger { color:#fff; background:var(--danger); border-color:var(--danger); }
-    button:disabled { opacity:.55; cursor:wait; } .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .actions { display:flex; gap:9px; align-items:center; margin-top:17px; }
+    button:disabled { opacity:.55; cursor:wait; } .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .actions { display:flex; gap:9px; align-items:center; margin-top:17px; } .field-label { display:block; margin:12px 0 5px; font-weight:650; }
     .hint { color:var(--muted); font-size:13px; } .notice { padding:10px 12px; border-radius:8px; background:var(--mint); color:#1e6655; } .error { color:var(--danger); background:#fbecec; }
     .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; } .ai-activity { display:flex; gap:8px; align-items:center; margin-top:16px; } .ai-activity-message { flex:1; } .ai-elapsed { color:#47746a; font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; } #ai-progress { margin-top:7px; } #ai-progress.running > div { width:34%; animation:ai-progress 1.2s ease-in-out infinite; } @keyframes ai-progress { from { transform:translateX(-120%); } to { transform:translateX(360%); } }
     dl { display:grid; grid-template-columns:126px 1fr; gap:6px 14px; margin:16px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
     .timeline { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f9fbfa; overflow-x:auto; } .timeline-title { margin:0 0 9px; font-size:13px; font-weight:750; } .timeline-scale { display:flex; justify-content:space-between; margin:0 3px 5px 88px; color:var(--muted); font-size:11px; } .speaker-lane { display:grid; grid-template-columns:76px minmax(420px, 1fr); gap:10px; align-items:center; min-width:560px; margin:5px 0; } .speaker-label { overflow:hidden; color:var(--muted); font-size:12px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .speaker-track { position:relative; height:14px; border-radius:4px; background:repeating-linear-gradient(90deg,#e8efed 0,#e8efed calc(10% - 1px),#dfe9e6 calc(10% - 1px),#dfe9e6 10%); } .speaker-turn { position:absolute; top:2px; height:10px; min-width:2px; border-radius:3px; box-shadow:0 1px 1px rgb(16 54 64 / 18%); } .timeline-empty { color:var(--muted); font-size:13px; }
+    .profile-options { display:grid; gap:8px; } .profile-option { display:grid; grid-template-columns:auto 1fr; gap:3px 9px; align-items:start; margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; cursor:pointer; } .profile-option:hover { border-color:#77ada4; background:#f7fbf9; } .profile-option input { width:auto; min-height:auto; margin:5px 0 0; } .profile-option strong { display:block; } .profile-option .choice-description { grid-column:2; } .profile-option.unavailable { opacity:.62; cursor:not-allowed; background:#f7f7f7; }
+    .original-preview { margin:12px 0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#f9fbfa; } .original-preview summary { cursor:pointer; font-weight:700; } .original-preview pre { margin:10px 0 0; max-height:280px; overflow:auto; white-space:pre-wrap; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
     a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; } .choices { display:grid; gap:7px; margin:8px 0; } .choice { display:flex; align-items:flex-start; gap:8px; margin:0; cursor:pointer; } .choice input { width:auto; min-height:auto; margin-top:5px; } .choice strong { display:block; font-weight:700; } .choice-description { display:block; color:var(--muted); font-size:13px; font-weight:400; } .speaker-guide { margin:10px 0; } .speaker-guide label { margin-bottom:4px; } .speaker-guide-inputs { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .result-switcher { margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#f7fbf9; } .result-switcher strong { display:block; margin-bottom:7px; } .result-choice { display:inline-flex; align-items:center; gap:5px; margin:0 16px 0 0; cursor:pointer; font-weight:700; } .result-choice input { width:auto; min-height:auto; margin:0; } pre.output { margin:12px 0 0; padding:13px; overflow:auto; white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; background:#f9fbfa; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
     @media (max-width:620px) { .grid { grid-template-columns:1fr; } dl { grid-template-columns:1fr; gap:1px; } dt { margin-top:8px; } .timeline { padding:11px; } }
   </style>
@@ -323,7 +326,7 @@ def _index_page(
     <p class="hint">지원 형식: M4A, MP3, WAV, FLAC, AAC, OGG · 서버는 한 번에 하나의 작업만 처리합니다.</p>
     <form id="upload-form">
       <div class="grid"><div><label for="audio">음성 파일</label><input id="audio" name="file" type="file" accept=".m4a,.mp3,.wav,.flac,.aac,.ogg" required></div>
-      <div><label for="profile">전사 품질</label><select id="profile" name="profile" disabled></select><p id="profile-status" class="hint">서버의 준비된 모델을 확인하고 있습니다…</p></div></div>
+      <div><span class="field-label" id="profile-label">전사 품질</span><div id="profile-options" class="profile-options" role="radiogroup" aria-labelledby="profile-label" aria-busy="true"></div><p id="profile-status" class="hint">서버의 준비된 모델을 확인하고 있습니다…</p></div></div>
       __ACCESS_TOKEN_SECTION__
       <div class="actions"><button id="submit" type="submit" disabled>업로드하고 분석 시작</button><span id="upload-status" class="hint"></span></div>
     </form>
@@ -336,6 +339,7 @@ def _index_page(
   <section id="ai-refinement" class="hidden">
     <h2>결과 만들기</h2>
     <p class="hint">원본 전사는 분석 결과로 자동 보존됩니다. 다듬은 대화와 요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 아래 안내 입력이 전달됩니다.</p>
+    <details class="original-preview"><summary>원본 전사 보기</summary><p class="hint">AI에 전달할 원본입니다. 목적·배경 안내를 입력하기 전에 내용을 확인하세요.</p><pre id="ai-original-transcript">원본 전사를 불러오는 중…</pre></details>
     <div class="choices" role="group" aria-label="받을 결과 선택">
       <label class="choice"><input id="ai-refined" type="checkbox"><span><strong>다듬은 대화</strong><span class="choice-description">AI가 말투와 오탈자를 다듬어 읽기 쉬운 대화로 만듭니다. 요약과 함께 선택할 수 있습니다.</span></span></label>
       <label class="choice"><input id="ai-summary" type="checkbox"><span><strong>요약</strong><span class="choice-description">AI가 핵심 내용, 결정 사항, 할 일을 짧게 정리합니다. 다듬은 대화와 함께 선택할 수 있습니다.</span></span></label>
@@ -409,7 +413,7 @@ def _index_page(
     $("ai-summary").checked = false;
     $("ai-status").textContent = "원본 전사는 준비되었습니다. 다듬은 대화 또는 요약을 선택해 만들 수 있습니다.";
     const speakers = [...new Set((job.speaker_segments || []).map((segment) => String(segment.speaker)).filter(Boolean))];
-    $("ai-speaker-guides").innerHTML = speakers.length ? `<label>화자 이름·역할 (선택)</label>${speakers.map((speaker) => `<div class="speaker-guide" data-speaker="${escapeHtml(speaker)}"><label>${escapeHtml(speaker)}</label><div class="speaker-guide-inputs"><input data-speaker-name type="text" maxlength="200" placeholder="표시 이름 · 예: 손태영"><input data-speaker-guidance type="text" maxlength="2000" placeholder="역할·안내 · 예: 저자 · 낭독자"></div></div>`).join("")}` : "";
+    $("ai-speaker-guides").innerHTML = speakers.length ? `<label>화자 이름·역할 (선택)</label>${speakers.map((speaker) => `<div class="speaker-guide" data-speaker="${escapeHtml(speaker)}"><label>${escapeHtml(speaker)}</label><div class="speaker-guide-inputs"><input data-speaker-name type="text" maxlength="200" placeholder="표시 이름 · 예: 화자 A"><input data-speaker-guidance type="text" maxlength="2000" placeholder="역할·안내 · 예: 회의 진행"></div></div>`).join("")}` : "";
     updateAiContext();
   }
   const AI_RESULT_LABELS = {original:"원본 전사", refined:"다듬은 대화", summary:"요약"};
@@ -425,6 +429,7 @@ def _index_page(
   }
   function renderAiRefinement(data) {
     const status = $("ai-status"), running = Boolean(data.active);
+    if (typeof data.original_transcript === "string") $("ai-original-transcript").textContent = data.original_transcript;
     aiRefinementActive = running;
     status.textContent = data.error || data.message;
     status.classList.toggle("error", data.state === "failed");
@@ -502,8 +507,12 @@ def _index_page(
     events.addEventListener("status", (event) => render(JSON.parse(event.data)));
     events.onerror = () => { events.close(); events = null; polling = setInterval(() => request(`/api/jobs/${id}`).then(render).catch(() => stopWatching()), 2000); };
   }
+  function selectedProfile() {
+    const key = document.querySelector('input[name="profile"]:checked')?.value;
+    return profiles.find((profile) => profile.key === key);
+  }
   function updateProfileState() {
-    const selected = profiles.find((profile) => profile.key === $("profile").value);
+    const selected = selectedProfile();
     const status = $("profile-status"), button = $("submit"), form = $("upload-form"), setup = $("server-setup");
     const available = profiles.filter((profile) => profile.available);
     if (!available.length) {
@@ -562,11 +571,12 @@ def _index_page(
   }
   async function loadProfiles() {
     const data = await request("/api/profiles"); profiles = data.profiles;
-    const select = $("profile");
-    select.innerHTML = profiles.map((profile) => `<option value="${escapeHtml(profile.key)}"${profile.available ? "" : " disabled"}>${escapeHtml(profile.label)}${profile.available ? "" : " · 준비 필요"}</option>`).join("");
+    const options = $("profile-options");
+    options.innerHTML = profiles.map((profile) => `<label class="profile-option${profile.available ? "" : " unavailable"}"><input name="profile" type="radio" value="${escapeHtml(profile.key)}"${profile.available ? "" : " disabled"}><span><strong>${escapeHtml(profile.label)}${profile.available ? "" : " · 준비 필요"}</strong><span class="choice-description">${escapeHtml(profile.available ? profile.description : profile.unavailable_reason)}</span></span></label>`).join("");
     const preferred = profiles.find((profile) => profile.key === "turbo" && profile.available) || profiles.find((profile) => profile.available);
-    if (preferred) select.value = preferred.key;
-    select.disabled = !preferred;
+    if (preferred) options.querySelector(`input[value="${preferred.key}"]`).checked = true;
+    options.querySelectorAll('input[name="profile"]').forEach((input) => input.addEventListener("change", updateProfileState));
+    options.setAttribute("aria-busy", "false");
     updateProfileState();
   }
   async function refreshProtectedData() {
@@ -575,20 +585,19 @@ def _index_page(
     catch (error) { $("upload-status").textContent = error.message; }
   }
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
-  $("profile").addEventListener("change", updateProfileState);
   $("llm-load-models")?.addEventListener("click", loadLlmModels);
   $("llm-verify")?.addEventListener("click", verifyLlmConnection);
   ["ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
   $("ai-run").addEventListener("click", startAiRefinement);
   $("ai-cancel").addEventListener("click", cancelAiRefinement);
   $("token")?.addEventListener("change", refreshProtectedData);
-  $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = profiles.find((profile) => profile.key === $("profile").value); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
+  $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = selectedProfile(); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
   $("cancel").addEventListener("click", async () => { if (!activeId) return; try { render((await request(`/api/jobs/${activeId}/cancel`, {method:"POST"})).job); } catch (error) { $("current-notice").textContent = error.message; $("current-notice").classList.add("error"); } });
   Promise.all([loadProfiles(), loadJobs(), $("local-ai") ? loadLlmConnection() : Promise.resolve()]).catch((error) => { $("upload-status").textContent = error.message; });
 </script>
 </body></html>"""
     local_llm_network_notice = """
-    <p class="notice error"><strong>사내 폐쇄망 모드입니다.</strong> 이 웹 화면에서 입력한 API 키와 AI 요청은 네트워크를 통해 서버로 전달됩니다. 신뢰하는 내부망에서만 사용하세요.</p>
+    <p class="notice error"><strong>로컬 연결 허용 모드입니다.</strong> 이 웹 화면에서 입력한 API 키와 AI 요청은 네트워크를 통해 서버로 전달됩니다. 신뢰하는 내부망에서만 사용하세요.</p>
     """ if local_llm_over_network else ""
     local_llm_section = """
   <section id="local-ai">
