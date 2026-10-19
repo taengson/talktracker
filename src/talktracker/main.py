@@ -12,10 +12,10 @@ import tkinter as tk
 from queue import Empty, Queue
 from threading import Event, Thread
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from tkinter import filedialog, messagebox, ttk
 
-from .core.llm_client import LocalLLMError, LocalLLMModel
+from .core.llm_client import LocalLLMError, LocalLLMHTTPError, LocalLLMModel, LocalLLMResponseError
 from .core.workflow import LocalLLMConnectionManager
 from .core.models import (
     WHISPER_PROFILES,
@@ -52,6 +52,41 @@ SUPPORTED_FILE_TYPES = [
     ("지원되는 음성 파일", "*.m4a *.mp3 *.wav *.flac *.aac *.ogg"),
     ("모든 파일", "*.*"),
 ]
+
+
+def _llm_operation_error_message(operation: str, error: LocalLLMError) -> str:
+    """Turn a safe client error into a concrete next step for the GUI."""
+
+    operation_label = "모델 목록을 불러오지 못했습니다" if operation == "models" else "연결을 확인하지 못했습니다"
+    if isinstance(error, LocalLLMHTTPError):
+        if error.status_code in {401, 403}:
+            return (
+                f"{operation_label}: API 키가 거부되었습니다. "
+                "API 키 표시를 눌러 공백·누락 없이 입력했는지 확인하고, 서버에서 발급한 키인지 확인해 주세요."
+            )
+        if error.status_code == 404:
+            endpoint = "/v1/models" if operation == "models" else "/v1/chat/completions"
+            return f"{operation_label}: 서버에 {endpoint} 경로가 없습니다. 서버 주소와 OpenAI 호환 API 설정을 확인해 주세요."
+        if error.status_code == 429:
+            return f"{operation_label}: 서버가 현재 요청을 제한하거나 처리 중입니다. 잠시 후 다시 시도해 주세요."
+        if error.status_code >= 500:
+            return f"{operation_label}: 서버 내부 오류(HTTP {error.status_code})입니다. 서버 로그와 모델 로드 상태를 확인해 주세요."
+    if isinstance(error, LocalLLMResponseError) and operation == "models":
+        return (
+            "모델 목록 응답을 읽지 못했습니다. 이 서버가 OpenAI 호환 /v1/models 형식을 제공하는지 확인하세요. "
+            "모델 ID를 알고 있다면 직접 입력한 뒤 연결 확인을 할 수 있습니다."
+        )
+    return f"{operation_label}: {error}"
+
+
+def _unexpected_llm_operation_error_message(operation: str, error: Exception) -> str:
+    """Expose a non-sensitive diagnostic code when an unexpected failure occurs."""
+
+    operation_label = "모델 목록을 불러오는 중" if operation == "models" else "연결을 확인하는 중"
+    return (
+        f"{operation_label} 앱에서 처리하지 못한 오류가 발생했습니다 (오류 코드: {type(error).__name__}). "
+        "서버 주소와 API 키를 다시 확인한 뒤 재시도하세요. 계속되면 이 오류 코드를 알려 주세요."
+    )
 
 
 class TalkTrackerApp(tk.Tk):
@@ -405,14 +440,14 @@ class TalkTrackerApp(tk.Tk):
         dialog.resizable(False, False)
         dialog.configure(bg=self.GROUND)
         dialog.transient(self)
-        self._center_dialog_over_app(dialog, 610, 445)
+        self._center_dialog_over_app(dialog, 610, 510)
 
         url_value = tk.StringVar(value=saved.base_url or "http://127.0.0.1:8000")
         api_key_value = tk.StringVar()
         model_value = tk.StringVar(value=saved.model)
         status_value = tk.StringVar(
             value=(
-                "같은 PC에서 실행 중인 OpenAI 호환 로컬 AI 서버에 연결합니다."
+                "같은 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다."
                 if not saved.is_configured
                 else "저장된 주소와 모델을 불러왔습니다. 연결 확인을 눌러 현재 상태를 점검하세요."
             )
@@ -423,7 +458,10 @@ class TalkTrackerApp(tk.Tk):
         tk.Label(header, text="로컬 AI 연결", bg=self.GROUND, fg=self.NAVY, font=("Segoe UI", 16, "bold")).pack(anchor="w")
         tk.Label(
             header,
-            text="LLM 서버는 별도로 실행해야 합니다. 서버 주소와 모델 ID만 저장하며 API 키는 이번 실행 중에만 사용합니다.",
+            text=(
+                "같은 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다. "
+                "AI 정리 기능을 사용할 때 전사문은 선택한 서버로 전달됩니다. API 키는 이번 실행 중에만 사용합니다."
+            ),
             bg=self.GROUND,
             fg=self.MUTED,
             font=("Segoe UI", 9),
@@ -435,21 +473,134 @@ class TalkTrackerApp(tk.Tk):
         form.pack(fill="x", padx=24, pady=(0, 12))
         form.grid_columnconfigure(1, weight=1)
 
-        def add_field(row: int, label: str, variable: tk.StringVar, *, secret: bool = False) -> ttk.Entry:
+        focus_value = tk.StringVar(value="현재 입력 위치: 서버 주소 · Tab 키로 다음 항목으로 이동할 수 있습니다.")
+
+        def show_focus(label: str) -> None:
+            focus_value.set(f"현재 입력 위치: {label} · Tab 키로 다음 항목으로 이동할 수 있습니다.")
+
+        def add_entry_field(parent: tk.Misc, variable: tk.StringVar, label: str) -> tk.Entry:
+            """Create a native text entry with a high-contrast insertion cursor."""
+
+            entry = tk.Entry(
+                parent,
+                textvariable=variable,
+                width=55,
+                bg=self.PAPER,
+                fg=self.INK,
+                insertbackground=self.TEAL_DARK,
+                insertwidth=3,
+                selectbackground="#BFE5DB",
+                selectforeground=self.INK,
+                relief="solid",
+                bd=1,
+                highlightthickness=2,
+                highlightbackground="#B8CCC7",
+                highlightcolor=self.TEAL,
+                font=("Segoe UI", 10),
+            )
+            entry.bind("<FocusIn>", lambda _event: show_focus(label), add="+")
+            return entry
+
+        def add_selectable_entry(
+            row: int,
+            label: str,
+            variable: tk.StringVar,
+            options: Callable[[], tuple[str, ...] | list[str]],
+        ) -> tuple[tk.Entry, tk.Button]:
             tk.Label(form, text=label, bg=self.PAPER, fg=self.INK, font=("Segoe UI", 9, "bold")).grid(
                 row=row, column=0, sticky="w", padx=(16, 12), pady=8
             )
-            entry = ttk.Entry(form, textvariable=variable, width=55, show="•" if secret else "")
-            entry.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=8)
-            return entry
+            area = tk.Frame(form, bg=self.PAPER)
+            area.grid(row=row, column=1, sticky="ew", padx=(0, 16), pady=8)
+            area.grid_columnconfigure(0, weight=1)
+            entry = add_entry_field(area, variable, label)
+            entry.grid(row=0, column=0, sticky="ew")
 
-        add_field(0, "서버 주소", url_value)
-        add_field(1, "API 키 (선택)", api_key_value, secret=True)
-        tk.Label(form, text="모델", bg=self.PAPER, fg=self.INK, font=("Segoe UI", 9, "bold")).grid(
-            row=2, column=0, sticky="w", padx=(16, 12), pady=8
+            def show_options() -> None:
+                menu = tk.Menu(dialog, tearoff=False, font=("Segoe UI", 10))
+                values = tuple(options())
+                if values:
+                    for value in values:
+                        menu.add_command(label=value, command=lambda selected=value: (variable.set(selected), entry.focus_set()))
+                else:
+                    menu.add_command(label="선택할 항목이 없습니다", state="disabled")
+                try:
+                    menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+                finally:
+                    menu.grab_release()
+
+            button = tk.Button(
+                area,
+                text="▼",
+                command=show_options,
+                bg="#EDF5F3",
+                fg=self.TEAL_DARK,
+                activebackground="#DDF1EC",
+                activeforeground=self.TEAL_DARK,
+                font=("Segoe UI", 8, "bold"),
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground="#B8CCC7",
+                padx=8,
+                pady=5,
+                cursor="hand2",
+            )
+            button.grid(row=0, column=1, sticky="ns", padx=(5, 0))
+            return entry, button
+
+        url_entry, url_options_button = add_selectable_entry(
+            0,
+            "서버 주소 (최근 성공 목록)",
+            url_value,
+            lambda: self.llm_connection_manager.snapshot().settings.recent_base_urls,
         )
-        model_box = ttk.Combobox(form, textvariable=model_value, width=52, state="normal")
-        model_box.grid(row=2, column=1, sticky="ew", padx=(0, 16), pady=8)
+
+        tk.Label(form, text="API 키 (선택)", bg=self.PAPER, fg=self.INK, font=("Segoe UI", 9, "bold")).grid(
+            row=1, column=0, sticky="w", padx=(16, 12), pady=8
+        )
+        api_key_area = tk.Frame(form, bg=self.PAPER)
+        api_key_area.grid(row=1, column=1, sticky="ew", padx=(0, 16), pady=8)
+        api_key_area.grid_columnconfigure(0, weight=1)
+        api_key_entry = add_entry_field(api_key_area, api_key_value, "API 키")
+        api_key_entry.configure(show="•")
+        api_key_entry.grid(row=0, column=0, sticky="ew")
+        api_key_entry.bind("<FocusIn>", lambda _event: show_focus("API 키"), add="+")
+        api_key_length = tk.StringVar(value="0자")
+        tk.Label(api_key_area, textvariable=api_key_length, bg=self.PAPER, fg=self.MUTED, font=("Segoe UI", 8), width=5).grid(
+            row=0, column=1, padx=(7, 5)
+        )
+        api_key_visible = tk.BooleanVar(value=False)
+
+        def toggle_api_key_visibility() -> None:
+            visible = not api_key_visible.get()
+            api_key_visible.set(visible)
+            api_key_entry.configure(show="" if visible else "•")
+            api_key_toggle.configure(text="숨기기" if visible else "표시")
+            show_focus("API 키")
+            api_key_entry.focus_set()
+
+        api_key_toggle = tk.Button(
+            api_key_area,
+            text="표시",
+            command=toggle_api_key_visibility,
+            bg="#EDF5F3",
+            fg=self.TEAL_DARK,
+            activebackground="#DDF1EC",
+            activeforeground=self.TEAL_DARK,
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#B8CCC7",
+            padx=9,
+            pady=4,
+            cursor="hand2",
+        )
+        api_key_toggle.grid(row=0, column=2, sticky="e")
+        api_key_value.trace_add("write", lambda *_args: api_key_length.set(f"{len(api_key_value.get())}자"))
+        model_options: list[str] = []
+        model_entry, model_options_button = add_selectable_entry(2, "모델", model_value, lambda: model_options)
         tk.Label(
             form,
             text="모델 목록을 제공하지 않는 서버는 모델 ID를 직접 입력할 수 있습니다.",
@@ -457,6 +608,14 @@ class TalkTrackerApp(tk.Tk):
             fg=self.MUTED,
             font=("Segoe UI", 8),
         ).grid(row=3, column=1, sticky="w", padx=(0, 16), pady=(0, 12))
+        tk.Label(
+            form,
+            textvariable=focus_value,
+            bg=self.PAPER,
+            fg=self.TEAL_DARK,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        ).grid(row=4, column=1, sticky="w", padx=(0, 16), pady=(0, 12))
 
         status_label = tk.Label(
             dialog,
@@ -488,7 +647,12 @@ class TalkTrackerApp(tk.Tk):
             state = "disabled" if value else "normal"
             load_button.configure(state=state)
             test_button.configure(state=state)
-            model_box.configure(state="disabled" if value else "normal")
+            url_entry.configure(state=state)
+            url_options_button.configure(state=state)
+            api_key_entry.configure(state=state)
+            api_key_toggle.configure(state=state)
+            model_entry.configure(state=state)
+            model_options_button.configure(state=state)
 
         def start_operation(operation: str) -> None:
             if self.llm_connection_operation_active:
@@ -514,9 +678,9 @@ class TalkTrackerApp(tk.Tk):
                             ("verified", dialog, self.llm_connection_manager.verify(base_url, api_key, model))
                         )
                 except LocalLLMError as error:
-                    self.llm_connection_events.put(("error", dialog, str(error)))
-                except Exception:
-                    self.llm_connection_events.put(("error", dialog, "로컬 AI 연결을 확인하는 중 예상하지 못한 오류가 발생했습니다."))
+                    self.llm_connection_events.put(("error", dialog, _llm_operation_error_message(operation, error)))
+                except Exception as error:
+                    self.llm_connection_events.put(("error", dialog, _unexpected_llm_operation_error_message(operation, error)))
 
             Thread(target=worker, name="talktracker-local-llm-check", daemon=True).start()
             self.after(80, poll_events)
@@ -536,7 +700,7 @@ class TalkTrackerApp(tk.Tk):
                         models = payload
                         assert isinstance(models, list)
                         model_ids = [item.id for item in models if isinstance(item, LocalLLMModel)]
-                        model_box.configure(values=model_ids)
+                        model_options[:] = model_ids
                         if model_ids and model_value.get().strip() not in model_ids:
                             model_value.set(model_ids[0])
                         status_value.set(
@@ -564,6 +728,7 @@ class TalkTrackerApp(tk.Tk):
         load_button.configure(command=lambda: start_operation("models"))
         test_button.configure(command=lambda: start_operation("test"))
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.after_idle(url_entry.focus_set)
 
     def open_model_manager(self) -> None:
         """Show local model state and offer the existing setup scripts."""

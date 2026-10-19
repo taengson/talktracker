@@ -300,6 +300,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     button.disabled = !selected.available;
   }
   function setLlmStatus(message, isError = false) { const status = $("llm-status"); status.textContent = message; status.classList.toggle("error", isError); }
+  function setLlmRecentServers(urls) { $("llm-url-options").innerHTML = urls.map((url) => `<option value="${escapeHtml(url)}">`).join(""); }
   function llmInput(includeModel = false) {
     const input = {base_url: $("llm-url").value.trim(), api_key: $("llm-api-key").value};
     if (includeModel) { input.model = $("llm-model").value.trim(); if (!input.model) throw new Error("연결을 확인할 모델을 선택하거나 직접 입력해 주세요."); }
@@ -312,6 +313,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
       if (connection.base_url) $("llm-url").value = connection.base_url;
       else if (!$("llm-url").value) $("llm-url").value = "http://127.0.0.1:8000";
       if (connection.model) $("llm-model").value = connection.model;
+      setLlmRecentServers(connection.recent_base_urls || []);
       setLlmStatus(connection.message, false);
     } catch (error) { setLlmStatus(error.message, true); }
   }
@@ -333,6 +335,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
       const connection = await request("/api/local-llm/verify", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)});
       const suffix = connection.response_preview ? ` 응답: ${connection.response_preview}` : "";
       setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.${suffix}`);
+      setLlmRecentServers(connection.recent_base_urls || []);
       $("llm-api-key").value = "";
     } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
   }
@@ -363,8 +366,8 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     local_llm_section = """
   <section id="local-ai">
     <h2>로컬 AI 연결</h2>
-    <p class="hint">이 서버 PC에서 실행 중인 OpenAI 호환 로컬 AI 서버에만 연결합니다. 서버 주소와 모델만 저장하며 API 키는 이번 연결 확인에만 사용합니다.</p>
-    <div class="grid"><div><label for="llm-url">서버 주소</label><input id="llm-url" type="text" inputmode="url" placeholder="http://127.0.0.1:8000"></div>
+    <p class="hint">현재 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다. AI 정리 기능을 사용할 때 전사문은 선택한 서버로 전달됩니다. 연결에 성공한 서버 주소와 모델을 기억하며 API 키는 이번 연결 확인에만 사용합니다.</p>
+    <div class="grid"><div><label for="llm-url">서버 주소 (최근 성공 목록)</label><input id="llm-url" type="text" inputmode="url" list="llm-url-options" placeholder="http://127.0.0.1:8000"><datalist id="llm-url-options"></datalist></div>
     <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
     <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
     <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
@@ -464,6 +467,7 @@ def create_app(
             "message": connection.message,
             "base_url": connection.settings.base_url,
             "model": connection.settings.model,
+            "recent_base_urls": list(connection.settings.recent_base_urls),
         }
 
     @app.post("/api/local-llm/models")
@@ -498,6 +502,7 @@ def create_app(
             "message": connection.message,
             "base_url": connection.settings.base_url,
             "model": result.model,
+            "recent_base_urls": list(connection.settings.recent_base_urls),
             "response_preview": result.response_preview,
         }
 

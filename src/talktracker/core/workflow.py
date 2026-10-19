@@ -54,7 +54,15 @@ class LocalLLMConnectionManager:
     def verify(self, base_url: str, api_key: str, model: str) -> LocalLLMConnectionTest:
         connection = LocalLLMConnection.create(base_url, api_key)
         result = self._client_factory(connection).test_connection(model)
-        settings = self._store.save(LocalLLMSettings(base_url=connection.base_url, model=result.model))
+        with self._lock:
+            recent_base_urls = self._settings.recent_base_urls
+        settings = self._store.save(
+            LocalLLMSettings(
+                base_url=connection.base_url,
+                model=result.model,
+                recent_base_urls=recent_base_urls,
+            )
+        )
         with self._lock:
             self._settings = settings
             self._connected = True

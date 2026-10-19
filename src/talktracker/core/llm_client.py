@@ -1,8 +1,9 @@
-"""Small OpenAI-compatible client used by TalkTracker's local LLM features.
+"""Small OpenAI-compatible client used by TalkTracker's LLM features.
 
 The project deliberately calls the two standard endpoints directly instead of
-depending on a particular local-server product.  It also restricts servers to
-loopback addresses: a transcript must not silently leave the current PC.
+depending on a particular server product.  A user may choose a server on the
+same PC or a trusted local network; the connection screen makes that data-flow
+choice explicit.
 """
 
 from __future__ import annotations
@@ -14,9 +15,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
-
-
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class LocalLLMError(RuntimeError):
@@ -37,7 +35,7 @@ class LocalLLMHTTPError(LocalLLMError):
 
 @dataclass(frozen=True)
 class LocalLLMConnection:
-    """A validated loopback OpenAI-compatible server address.
+    """A validated OpenAI-compatible server address.
 
     ``api_key`` intentionally lives only on this runtime object.  The settings
     store persists the endpoint and model identifier, never this field.
@@ -73,7 +71,11 @@ class LocalLLMConnectionTest:
 
 
 def normalize_local_server_url(value: str) -> str:
-    """Normalize an OpenAI-compatible loopback URL to an API ``/v1`` root."""
+    """Normalize a user-selected OpenAI-compatible URL to an API ``/v1`` root.
+
+    The caller chooses the server.  Credentials, queries, and fragments stay
+    out of URLs so they cannot be accidentally persisted in connection history.
+    """
 
     candidate = value.strip()
     if not candidate:
@@ -86,8 +88,6 @@ def normalize_local_server_url(value: str) -> str:
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in {"http", "https"} or not host:
         raise LocalLLMError("로컬 AI 서버 주소는 http 또는 https 주소여야 합니다.")
-    if host not in LOOPBACK_HOSTS:
-        raise LocalLLMError("로컬 AI 서버는 localhost 또는 127.0.0.1 주소만 연결할 수 있습니다.")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise LocalLLMError("서버 주소에는 계정 정보, 쿼리, 조각 식별자를 넣을 수 없습니다.")
 

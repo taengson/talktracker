@@ -12,6 +12,7 @@ from urllib.error import HTTPError
 from talktracker.core.llm_client import (
     LocalLLMConnection,
     LocalLLMError,
+    LocalLLMHTTPError,
     LocalLLMModel,
     OpenAICompatibleLocalClient,
     _server_error_message,
@@ -19,6 +20,7 @@ from talktracker.core.llm_client import (
 )
 from talktracker.core.llm_config import LocalLLMSettings, LocalLLMSettingsStore
 from talktracker.core.workflow import LocalLLMConnectionManager
+from talktracker.main import _llm_operation_error_message, _unexpected_llm_operation_error_message
 
 
 class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
@@ -87,11 +89,13 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(_OpenAICompatibleHandler.received_model, "talktracker-test")
         self.assertEqual(_OpenAICompatibleHandler.received_authorization, "Bearer temporary-secret")
 
-    def test_only_loopback_server_urls_are_accepted(self) -> None:
+    def test_trusted_network_openai_compatible_server_urls_are_accepted(self) -> None:
         self.assertEqual(normalize_local_server_url("http://localhost:8080"), "http://localhost:8080/v1")
         self.assertEqual(normalize_local_server_url("http://[::1]:8080/v1/"), "http://[::1]:8080/v1")
+        self.assertEqual(normalize_local_server_url("http://192.168.0.20:8000"), "http://192.168.0.20:8000/v1")
+        self.assertEqual(normalize_local_server_url("http://spark-f8df:12300/v1"), "http://spark-f8df:12300/v1")
 
-        for value in ("https://example.com", "http://192.168.0.20:8000", "http://user:pass@localhost:8000", "http://localhost:8000/?a=1"):
+        for value in ("ftp://spark-f8df:12300", "http://user:pass@spark-f8df:12300", "http://spark-f8df:12300/?api_key=secret"):
             with self.subTest(value=value), self.assertRaises(LocalLLMError):
                 normalize_local_server_url(value)
 
@@ -111,20 +115,61 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
 
 
 class LocalLLMSettingsTests(unittest.TestCase):
-    def test_settings_exclude_api_keys_and_connection_is_runtime_only(self) -> None:
+    def test_unsuccessful_server_is_not_remembered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings" / "local-llm.json"
+            manager = LocalLLMConnectionManager(settings_store=LocalLLMSettingsStore(path), client_factory=_FailingClient)
+
+            with self.assertRaises(LocalLLMError):
+                manager.verify("http://localhost:11434", "temporary-secret", "unavailable-model")
+
+            self.assertFalse(path.exists())
+            self.assertEqual(manager.snapshot().settings.recent_base_urls, ())
+
+    def test_settings_remember_successful_servers_without_api_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings" / "local-llm.json"
             store = LocalLLMSettingsStore(path)
             manager = LocalLLMConnectionManager(settings_store=store, client_factory=_FakeClient)
 
             result = manager.verify("http://localhost:11434", "temporary-secret", "local-model")
+            manager.verify("http://127.0.0.1:8000", "another-secret", "local-model")
 
             self.assertEqual(result.model, "local-model")
             self.assertTrue(manager.snapshot().connected)
             persisted = path.read_text(encoding="utf-8")
             self.assertNotIn("temporary-secret", persisted)
-            self.assertEqual(json.loads(persisted), {"base_url": "http://localhost:11434/v1", "model": "local-model"})
-            self.assertEqual(store.load(), LocalLLMSettings("http://localhost:11434/v1", "local-model"))
+            self.assertNotIn("another-secret", persisted)
+            self.assertEqual(
+                json.loads(persisted),
+                {
+                    "base_url": "http://127.0.0.1:8000/v1",
+                    "model": "local-model",
+                    "recent_base_urls": ["http://127.0.0.1:8000/v1", "http://localhost:11434/v1"],
+                },
+            )
+            self.assertEqual(
+                store.load(),
+                LocalLLMSettings(
+                    "http://127.0.0.1:8000/v1",
+                    "local-model",
+                    ("http://127.0.0.1:8000/v1", "http://localhost:11434/v1"),
+                ),
+            )
+
+
+class LocalLLMDisplayErrorTests(unittest.TestCase):
+    def test_authentication_error_tells_user_how_to_check_a_key(self) -> None:
+        message = _llm_operation_error_message("models", LocalLLMHTTPError(401, "인증 오류"))
+
+        self.assertIn("API 키 표시", message)
+        self.assertIn("모델 목록", message)
+
+    def test_unexpected_error_has_a_safe_diagnostic_code(self) -> None:
+        message = _unexpected_llm_operation_error_message("models", KeyError("api_key"))
+
+        self.assertIn("KeyError", message)
+        self.assertNotIn("api_key", message)
 
 
 class _FakeClient:
@@ -138,6 +183,11 @@ class _FakeClient:
         from talktracker.core.llm_client import LocalLLMConnectionTest
 
         return LocalLLMConnectionTest(model=model, response_preview="OK")
+
+
+class _FailingClient(_FakeClient):
+    def test_connection(self, model: str):
+        raise LocalLLMError("연결할 수 없습니다.")
 
 
 if __name__ == "__main__":

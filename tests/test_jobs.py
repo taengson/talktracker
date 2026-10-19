@@ -173,6 +173,7 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('id="local-ai"', page)
         self.assertIn('/api/local-llm/verify', page)
         self.assertIn('id="llm-api-key"', page)
+        self.assertIn('id="llm-url-options"', page)
         self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
         protected_page = _index_page(access_token_required=True)
@@ -206,12 +207,21 @@ class ServerPageTests(unittest.TestCase):
                 self.assertEqual(verified.status_code, 200)
                 self.assertTrue(verified.json()["connected"])
                 self.assertEqual(verified.json()["model"], "talktracker-test")
+                self.assertEqual(verified.json()["recent_base_urls"], ["http://localhost:11434/v1"])
 
-                rejected = client.post(
+                network_server = client.post(
                     "/api/local-llm/models",
-                    json={"base_url": "http://example.com:8000", "api_key": "temporary-secret"},
+                    json={"base_url": "http://spark-f8df:8000", "api_key": "temporary-secret"},
                 )
-                self.assertEqual(rejected.status_code, 422)
+                self.assertEqual(network_server.status_code, 200)
+                self.assertEqual(network_server.json()["models"], [{"id": "talktracker-test", "owned_by": "local"}])
+
+                unsafe_url = client.post(
+                    "/api/local-llm/models",
+                    json={"base_url": "http://user:pass@spark-f8df:8000", "api_key": "temporary-secret"},
+                )
+                self.assertEqual(unsafe_url.status_code, 422)
+                self.assertNotIn("temporary-secret", unsafe_url.text)
 
                 malformed = client.post(
                     "/api/local-llm/models",
