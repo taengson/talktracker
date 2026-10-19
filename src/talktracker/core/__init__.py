@@ -13,7 +13,7 @@ from .llm_client import (
     OpenAICompatibleLocalClient,
     normalize_local_server_url,
 )
-from .llm_config import LocalLLMSettings, LocalLLMSettingsStore
+from .llm_config import LocalLLMResponseTokenLimit, LocalLLMSettings, LocalLLMSettingsStore
 from .models import (
     WHISPER_PROFILES,
     CudaRuntimeStatus,
@@ -33,8 +33,10 @@ from .refinement import (
     RefinementError,
     ResultSelection,
     SpeakerGuide,
+    merge_ai_refinement_results,
     render_original_conversation,
     render_refined_conversation,
+    render_result_documents,
     render_selected_markdown,
     render_summary,
 )
@@ -56,6 +58,7 @@ __all__ = [
     "LocalLLMHTTPError",
     "LocalLLMModel",
     "LocalLLMResponseError",
+    "LocalLLMResponseTokenLimit",
     "LocalLLMSettings",
     "LocalLLMSettingsStore",
     "AIRefinementBusyError",
@@ -79,8 +82,10 @@ __all__ = [
     "get_whisper_profile",
     "get_whisper_runtime",
     "normalize_local_server_url",
+    "merge_ai_refinement_results",
     "render_original_conversation",
     "render_refined_conversation",
+    "render_result_documents",
     "render_selected_markdown",
     "render_summary",
 ]

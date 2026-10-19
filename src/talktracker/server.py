@@ -18,19 +18,24 @@ from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import RLock
+from time import monotonic
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from .core.jobs import JobManager, JobNotFoundError, JobStateError
 from .core.refinement import (
     AIRefinementRequest,
+    AIRefinementResult,
     RefinementError,
     ResultSelection,
     SpeakerGuide,
+    merge_ai_refinement_results,
     render_original_conversation,
     render_refined_conversation,
+    render_result_documents,
     render_summary,
 )
 from .core.llm_client import LocalLLMError
@@ -84,7 +89,13 @@ async def _read_refinement_request(request: Request) -> AIRefinementRequest:
     selection_raw = payload.get("selection", {})
     if not isinstance(selection_raw, dict):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="결과 선택 형식이 올바르지 않습니다.")
-    values = {name: selection_raw.get(name, default) for name, default in (("original", True), ("refined", False), ("summary", False))}
+    refined = selection_raw.get("refined", False)
+    summary = selection_raw.get("summary", False)
+    # The browser UI always preserves the source transcription automatically.
+    # Retain explicit ``original: true`` for API compatibility, but do not make
+    # a missing selection silently run a no-op "original only" operation.
+    original = selection_raw.get("original", False)
+    values = {"original": original, "refined": refined, "summary": summary}
     if not all(isinstance(value, bool) for value in values.values()):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="결과 선택 형식이 올바르지 않습니다.")
     background = payload.get("background", "")
@@ -93,11 +104,15 @@ async def _read_refinement_request(request: Request) -> AIRefinementRequest:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="AI 정리 입력 길이 또는 형식이 올바르지 않습니다.")
     guides: list[SpeakerGuide] = []
     for item in guides_raw:
-        if not isinstance(item, dict) or not isinstance(item.get("speaker"), str) or not isinstance(item.get("guidance"), str):
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 안내 입력 형식이 올바르지 않습니다.")
-        if len(item["speaker"]) > 200 or len(item["guidance"]) > 2_000:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 안내 입력 길이가 너무 깁니다.")
-        guides.append(SpeakerGuide(speaker=item["speaker"], guidance=item["guidance"]))
+        if not isinstance(item, dict) or not isinstance(item.get("speaker"), str):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 이름·역할 입력 형식이 올바르지 않습니다.")
+        display_name = item.get("display_name", "")
+        guidance = item.get("guidance", "")
+        if not isinstance(display_name, str) or not isinstance(guidance, str):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 이름·역할 입력 형식이 올바르지 않습니다.")
+        if len(item["speaker"]) > 200 or len(display_name) > 200 or len(guidance) > 2_000:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 이름·역할 입력 길이가 너무 깁니다.")
+        guides.append(SpeakerGuide(speaker=item["speaker"], display_name=display_name, guidance=guidance))
     try:
         return AIRefinementRequest(
             selection=ResultSelection(**values),
@@ -108,23 +123,33 @@ async def _read_refinement_request(request: Request) -> AIRefinementRequest:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
 
 
-def _refinement_payload(analysis: Any, state: AIRefinementState) -> dict[str, Any]:
-    """Serialize only requested result sections; guides and API keys never leave memory."""
+def _refinement_payload(
+    analysis: Any,
+    state: AIRefinementState,
+    *,
+    stored_result: AIRefinementResult | None = None,
+) -> dict[str, Any]:
+    """Serialize one job's accumulated documents without exposing guide input."""
 
+    elapsed_seconds = 0
+    if state.started_at is not None:
+        ended_at = state.finished_at if state.finished_at is not None else monotonic()
+        elapsed_seconds = max(0, round(ended_at - state.started_at))
     payload: dict[str, Any] = {
         "state": state.state,
         "message": state.message,
         "active": state.active,
+        "elapsed_seconds": elapsed_seconds,
         "error": state.error,
         "owner_id": state.owner_id,
         "result": None,
     }
-    if not state.result:
+    result = stored_result or state.result
+    if not result:
         return payload
-    result = state.result
-    sections: dict[str, str] = {}
-    if result.selection.original:
-        sections["original"] = render_original_conversation(analysis)
+    # A refinement never changes the source transcript.  Return it alongside
+    # AI results so the browser can switch among separate documents.
+    sections: dict[str, str] = {"original": render_original_conversation(analysis)}
     if result.selection.refined:
         sections["refined"] = render_refined_conversation(analysis, result)
     if result.selection.summary and result.summary:
@@ -277,10 +302,10 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     button.secondary { color:var(--ink); background:#fff; border-color:#a9bbb7; } button.danger { color:#fff; background:var(--danger); border-color:var(--danger); }
     button:disabled { opacity:.55; cursor:wait; } .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .actions { display:flex; gap:9px; align-items:center; margin-top:17px; }
     .hint { color:var(--muted); font-size:13px; } .notice { padding:10px 12px; border-radius:8px; background:var(--mint); color:#1e6655; } .error { color:var(--danger); background:#fbecec; }
-    .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; }
+    .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; } .ai-activity { display:flex; gap:8px; align-items:center; margin-top:16px; } .ai-activity-message { flex:1; } .ai-elapsed { color:#47746a; font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; } #ai-progress { margin-top:7px; } #ai-progress.running > div { width:34%; animation:ai-progress 1.2s ease-in-out infinite; } @keyframes ai-progress { from { transform:translateX(-120%); } to { transform:translateX(360%); } }
     dl { display:grid; grid-template-columns:126px 1fr; gap:6px 14px; margin:16px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
     .timeline { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f9fbfa; overflow-x:auto; } .timeline-title { margin:0 0 9px; font-size:13px; font-weight:750; } .timeline-scale { display:flex; justify-content:space-between; margin:0 3px 5px 88px; color:var(--muted); font-size:11px; } .speaker-lane { display:grid; grid-template-columns:76px minmax(420px, 1fr); gap:10px; align-items:center; min-width:560px; margin:5px 0; } .speaker-label { overflow:hidden; color:var(--muted); font-size:12px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .speaker-track { position:relative; height:14px; border-radius:4px; background:repeating-linear-gradient(90deg,#e8efed 0,#e8efed calc(10% - 1px),#dfe9e6 calc(10% - 1px),#dfe9e6 10%); } .speaker-turn { position:absolute; top:2px; height:10px; min-width:2px; border-radius:3px; box-shadow:0 1px 1px rgb(16 54 64 / 18%); } .timeline-empty { color:var(--muted); font-size:13px; }
-    a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; } .choices { display:flex; flex-wrap:wrap; gap:14px; margin:8px 0; } .choices label { display:flex; align-items:center; gap:6px; margin:0; font-weight:650; } .choices input { width:auto; min-height:auto; } .speaker-guide { margin:8px 0; } .result-section { margin-top:14px; } .result-section h3 { margin:0 0 7px; font-size:15px; } pre.output { margin:0; padding:13px; overflow:auto; white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; background:#f9fbfa; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; } .choices { display:grid; gap:7px; margin:8px 0; } .choice { display:flex; align-items:flex-start; gap:8px; margin:0; cursor:pointer; } .choice input { width:auto; min-height:auto; margin-top:5px; } .choice strong { display:block; font-weight:700; } .choice-description { display:block; color:var(--muted); font-size:13px; font-weight:400; } .speaker-guide { margin:10px 0; } .speaker-guide label { margin-bottom:4px; } .speaker-guide-inputs { display:grid; grid-template-columns:1fr 1fr; gap:8px; } .result-switcher { margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#f7fbf9; } .result-switcher strong { display:block; margin-bottom:7px; } .result-choice { display:inline-flex; align-items:center; gap:5px; margin:0 16px 0 0; cursor:pointer; font-weight:700; } .result-choice input { width:auto; min-height:auto; margin:0; } pre.output { margin:12px 0 0; padding:13px; overflow:auto; white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; background:#f9fbfa; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
     @media (max-width:620px) { .grid { grid-template-columns:1fr; } dl { grid-template-columns:1fr; gap:1px; } dt { margin-top:8px; } .timeline { padding:11px; } }
   </style>
 </head>
@@ -301,22 +326,23 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   </section>
   <section id="current" class="hidden">
     <h2>현재 작업</h2><div id="current-notice" class="notice"></div><div class="progress" aria-label="분석 진행률"><div id="progress-bar"></div></div>
-    <dl id="details"></dl><div id="timeline" class="timeline"></div><div class="actions"><button id="cancel" class="danger" type="button">중단</button><a id="result" class="hidden" download>Markdown 결과 다운로드</a></div>
+    <dl id="details"></dl><div id="timeline" class="timeline"></div><div class="actions"><button id="cancel" class="danger" type="button">중단</button><a id="result" class="hidden" download>원본 전사 문서 다운로드</a></div>
   </section>
   <section id="ai-refinement" class="hidden">
-    <h2>AI로 결과 정리</h2>
-    <p class="hint">원본 전사는 바뀌지 않습니다. 다듬은 대화와 요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 아래 안내 입력이 전달됩니다.</p>
+    <h2>결과 만들기</h2>
+    <p class="hint">원본 전사는 분석 결과로 자동 보존됩니다. 다듬은 대화와 요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 아래 안내 입력이 전달됩니다.</p>
     <div class="choices" role="group" aria-label="받을 결과 선택">
-      <label><input id="ai-original" type="checkbox" checked> 원본 전사 메시지</label>
-      <label><input id="ai-refined" type="checkbox"> 다듬은 대화</label>
-      <label><input id="ai-summary" type="checkbox"> 요약</label>
+      <label class="choice"><input id="ai-refined" type="checkbox"><span><strong>다듬은 대화</strong><span class="choice-description">AI가 말투와 오탈자를 다듬어 읽기 쉬운 대화로 만듭니다. 요약과 함께 선택할 수 있습니다.</span></span></label>
+      <label class="choice"><input id="ai-summary" type="checkbox"><span><strong>요약</strong><span class="choice-description">AI가 핵심 내용, 결정 사항, 할 일을 짧게 정리합니다. 다듬은 대화와 함께 선택할 수 있습니다.</span></span></label>
     </div>
     <div id="ai-context" class="hidden">
       <label for="ai-background">대화의 목적·배경 안내 (선택)</label>
       <textarea id="ai-background" maxlength="20000" placeholder="회의 목적, 참여자 역할, 프로젝트명, 약어·고유명사를 자세히 적으면 전사 보정과 요약이 더 정확해집니다. 입력한 내용도 로컬 AI 서버에만 전달됩니다."></textarea>
-      <p class="hint">화자 안내는 AI가 문맥을 이해하는 보조 정보이며 결과 문서에는 자동으로 표시하지 않습니다.</p>
+      <p class="hint">입력한 화자 이름은 다듬은 대화의 화자 표시에 적용됩니다. 역할·안내는 AI가 문맥을 이해하는 보조 정보입니다.</p>
       <div id="ai-speaker-guides"></div>
     </div>
+    <div id="ai-activity" class="notice ai-activity hidden" role="status"><span aria-hidden="true">●</span><span id="ai-activity-message" class="ai-activity-message"></span><strong id="ai-elapsed" class="ai-elapsed"></strong></div>
+    <div id="ai-progress" class="progress hidden" aria-label="AI 정리 진행 중"><div></div></div>
     <div class="actions"><button id="ai-run" type="button">선택한 결과 만들기</button><button id="ai-cancel" class="danger hidden" type="button">AI 정리 중단</button></div>
     <p id="ai-status" class="notice">분석이 끝나면 결과를 선택할 수 있습니다.</p>
     <div id="ai-results"></div>
@@ -324,7 +350,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [];
+  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [];
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token")?.value.trim() || "";
@@ -353,30 +379,67 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   function updateAiContext() {
     const needsAi = $("ai-refined").checked || $("ai-summary").checked;
     $("ai-context").classList.toggle("hidden", !needsAi);
+    if (!aiRefinementActive) {
+      $("ai-run").disabled = !needsAi;
+      if (!needsAi) {
+        $("ai-status").textContent = "다듬은 대화 또는 요약을 하나 이상 체크해 주세요.";
+        $("ai-status").classList.remove("error");
+      } else {
+        $("ai-status").textContent = "체크한 AI 결과를 만듭니다. 원본 전사는 그대로 유지됩니다.";
+        $("ai-status").classList.remove("error");
+      }
+    }
+  }
+  function setAiInputsLocked(locked) {
+    ["ai-refined", "ai-summary", "ai-background"].forEach((id) => $(id).disabled = locked);
+    $("ai-speaker-guides").querySelectorAll("input[data-speaker-name], input[data-speaker-guidance]").forEach((input) => input.disabled = locked);
   }
   function prepareAiControls(job) {
     const panel = $("ai-refinement");
     if (panel.dataset.jobId === job.id) return;
     panel.dataset.jobId = job.id;
+    aiResultView = ""; aiResultSections = {}; aiResultWarnings = [];
     $("ai-results").innerHTML = "";
-    $("ai-status").textContent = "받을 결과를 고른 뒤 ‘선택한 결과 만들기’를 누르세요.";
+    $("ai-refined").checked = false;
+    $("ai-summary").checked = false;
+    $("ai-status").textContent = "원본 전사는 준비되었습니다. 다듬은 대화 또는 요약을 선택해 만들 수 있습니다.";
     const speakers = [...new Set((job.speaker_segments || []).map((segment) => String(segment.speaker)).filter(Boolean))];
-    $("ai-speaker-guides").innerHTML = speakers.map((speaker, index) => `<div class="speaker-guide"><label for="ai-speaker-${index}">${escapeHtml(speaker)} 안내 (선택)</label><input id="ai-speaker-${index}" data-speaker="${escapeHtml(speaker)}" type="text" maxlength="2000" placeholder="예: 프로젝트 매니저 · 개발 담당"></div>`).join("");
+    $("ai-speaker-guides").innerHTML = speakers.length ? `<label>화자 이름·역할 (선택)</label>${speakers.map((speaker) => `<div class="speaker-guide" data-speaker="${escapeHtml(speaker)}"><label>${escapeHtml(speaker)}</label><div class="speaker-guide-inputs"><input data-speaker-name type="text" maxlength="200" placeholder="표시 이름 · 예: 손태영"><input data-speaker-guidance type="text" maxlength="2000" placeholder="역할·안내 · 예: 저자 · 낭독자"></div></div>`).join("")}` : "";
     updateAiContext();
+  }
+  const AI_RESULT_LABELS = {original:"원본 전사", refined:"다듬은 대화", summary:"요약"};
+  function renderAiResultDocuments() {
+    const keys = ["original", "refined", "summary"].filter((key) => Object.prototype.hasOwnProperty.call(aiResultSections, key));
+    if (!keys.length) { $("ai-results").innerHTML = ""; return; }
+    if (!keys.includes(aiResultView)) aiResultView = keys.includes("refined") ? "refined" : keys[0];
+    const choices = keys.map((key) => `<label class="result-choice"><input type="radio" name="ai-result-view" value="${key}"${key === aiResultView ? " checked" : ""}>${escapeHtml(AI_RESULT_LABELS[key])}</label>`).join("");
+    const documents = keys.map((key) => `<a download href="${apiUrl(`/api/jobs/${activeId}/ai-results/${key}.md`, true)}">${escapeHtml(AI_RESULT_LABELS[key])} 문서 다운로드</a>`).join(" · ");
+    const warnings = aiResultWarnings.map((warning) => `<p class="notice error">${escapeHtml(warning)}</p>`).join("");
+    $("ai-results").innerHTML = `${warnings}<div class="result-switcher"><strong>현재 화면: ${escapeHtml(AI_RESULT_LABELS[aiResultView])}</strong><div>${choices}</div><p class="hint">원본 전사는 분석 결과이며, AI 결과는 별도 문서로 보존됩니다.</p><pre class="output">${escapeHtml(aiResultSections[aiResultView])}</pre><p class="actions">${documents}</p></div>`;
+    $("ai-results").querySelectorAll('input[name="ai-result-view"]').forEach((input) => input.addEventListener("change", () => { aiResultView = input.value; renderAiResultDocuments(); }));
   }
   function renderAiRefinement(data) {
     const status = $("ai-status"), running = Boolean(data.active);
+    aiRefinementActive = running;
     status.textContent = data.error || data.message;
     status.classList.toggle("error", data.state === "failed");
-    $("ai-run").disabled = running;
+    const activity = $("ai-activity"), hasTiming = data.state !== "idle" && Number.isFinite(Number(data.elapsed_seconds));
+    activity.classList.toggle("hidden", !hasTiming);
+    $("ai-progress").classList.toggle("hidden", !running);
+    $("ai-progress").classList.toggle("running", running);
+    if (hasTiming) {
+      $("ai-activity-message").textContent = data.message;
+      $("ai-elapsed").textContent = `${running ? "경과" : "총"} ${duration(data.elapsed_seconds)}`;
+    }
+    setAiInputsLocked(running);
+    $("ai-run").disabled = running || !($("ai-refined").checked || $("ai-summary").checked);
     $("ai-cancel").classList.toggle("hidden", !running);
     $("ai-cancel").disabled = !running;
     const result = data.result;
     if (!result) return;
-    const labels = {original:"원본 전사 메시지", refined:"다듬은 대화", summary:"요약"};
-    const sections = Object.entries(result.sections || {}).map(([key, value]) => `<div class="result-section"><h3>${escapeHtml(labels[key] || key)}</h3><pre class="output">${escapeHtml(value)}</pre></div>`).join("");
-    const warnings = (result.warnings || []).map((warning) => `<p class="notice error">${escapeHtml(warning)}</p>`).join("");
-    $("ai-results").innerHTML = `${warnings}${sections}`;
+    aiResultSections = result.sections || {};
+    aiResultWarnings = result.warnings || [];
+    renderAiResultDocuments();
   }
   function stopRefinementWatching() { if (refinementPolling) { clearInterval(refinementPolling); refinementPolling = null; } }
   async function loadAiRefinement(id = activeId) {
@@ -389,9 +452,9 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     } catch (error) { $("ai-status").textContent = error.message; $("ai-status").classList.add("error"); stopRefinementWatching(); }
   }
   function aiInput() {
-    const selection = {original:$("ai-original").checked, refined:$("ai-refined").checked, summary:$("ai-summary").checked};
-    if (!selection.original && !selection.refined && !selection.summary) throw new Error("결과로 받을 항목을 하나 이상 선택해 주세요.");
-    const speaker_guides = [...$("ai-speaker-guides").querySelectorAll("input[data-speaker]")].map((input) => ({speaker:input.dataset.speaker, guidance:input.value}));
+    const selection = {refined:$("ai-refined").checked, summary:$("ai-summary").checked};
+    if (!selection.refined && !selection.summary) throw new Error("다듬은 대화 또는 요약을 하나 이상 선택해 주세요.");
+    const speaker_guides = [...$("ai-speaker-guides").querySelectorAll(".speaker-guide[data-speaker]")].map((row) => ({speaker:row.dataset.speaker, display_name:row.querySelector("input[data-speaker-name]").value, guidance:row.querySelector("input[data-speaker-guidance]").value}));
     return {selection, background:$("ai-background").value, speaker_guides};
   }
   async function startAiRefinement() {
@@ -510,7 +573,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   $("profile").addEventListener("change", updateProfileState);
   $("llm-load-models")?.addEventListener("click", loadLlmModels);
   $("llm-verify")?.addEventListener("click", verifyLlmConnection);
-  ["ai-original","ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
+  ["ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
   $("ai-run").addEventListener("click", startAiRefinement);
   $("ai-cancel").addEventListener("click", cancelAiRefinement);
   $("token")?.addEventListener("change", refreshProtectedData);
@@ -561,6 +624,11 @@ def create_app(
         local_llm_manager,
         execution_lock=job_manager.execution_lock,
     )
+    # The execution manager only exposes the latest request.  Keep validated
+    # results by job so that a later summary request does not replace a
+    # previously created refined conversation (and vice versa).
+    refinement_results: dict[str, AIRefinementResult] = {}
+    refinement_results_lock = RLock()
     job_manager.cleanup_expired(retention_days)
 
     @asynccontextmanager
@@ -572,6 +640,7 @@ def create_app(
     app.state.job_manager = job_manager
     app.state.local_llm_manager = local_llm_manager
     app.state.ai_refinement_manager = refinement_manager
+    app.state.ai_refinement_results = refinement_results
     app.state.local_llm_enabled = local_llm_enabled
     app.state.access_token_required = bool(token)
     app.state.max_upload_bytes = max_upload_mb * 1024 * 1024
@@ -595,6 +664,27 @@ def create_app(
             return job_manager.snapshot(job_id)
         except JobNotFoundError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
+
+    def stored_refinement_result(job_id: str, state: AIRefinementState) -> AIRefinementResult | None:
+        """Store a finished request before another job can replace its state."""
+
+        with refinement_results_lock:
+            existing = refinement_results.get(job_id)
+            if state.owner_id == job_id and state.state == "completed" and state.result:
+                existing = merge_ai_refinement_results(existing, state.result)
+                refinement_results[job_id] = existing
+            return existing
+
+    def refinement_payload_for_job(job_id: str, analysis: Any) -> dict[str, Any]:
+        state = refinement_manager.snapshot()
+        stored_result = stored_refinement_result(job_id, state)
+        if state.owner_id not in {None, job_id}:
+            state = AIRefinementState(
+                state="idle",
+                message="다른 분석 결과의 AI 정리 작업이 진행 중입니다.",
+                owner_id=state.owner_id,
+            )
+        return _refinement_payload(analysis, state, stored_result=stored_result)
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
@@ -676,17 +766,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
         except JobStateError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-        state = refinement_manager.snapshot()
-        if state.owner_id not in {None, job_id}:
-            return {
-                "state": "idle",
-                "message": "다른 분석 결과의 AI 정리 작업이 진행 중입니다.",
-                "active": False,
-                "error": None,
-                "owner_id": state.owner_id,
-                "result": None,
-            }
-        return _refinement_payload(analysis, state)
+        return refinement_payload_for_job(job_id, analysis)
 
     @app.post("/api/jobs/{job_id}/ai-refinement")
     async def start_ai_refinement(job_id: str, request: Request, _: None = Depends(require_access)) -> dict[str, Any]:
@@ -703,10 +783,17 @@ def create_app(
                 detail="로컬 AI 연결을 확인한 뒤 다듬은 대화 또는 요약을 만들 수 있습니다.",
             )
         try:
+            # Capture a completed earlier pass before the manager state is
+            # reused for this new refined-conversation or summary request.
+            stored_refinement_result(job_id, refinement_manager.snapshot())
             state = refinement_manager.start(analysis, refinement_request, owner_id=job_id)
+            # A small local model can finish before ``start`` returns.  Merge
+            # that completed state now so this response never hides its new
+            # document until the browser's next polling interval.
+            stored_result = stored_refinement_result(job_id, state)
         except AIRefinementBusyError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-        return _refinement_payload(analysis, state)
+        return _refinement_payload(analysis, state, stored_result=stored_result)
 
     @app.post("/api/jobs/{job_id}/ai-refinement/cancel")
     def cancel_ai_refinement(job_id: str, _: None = Depends(require_access)) -> dict[str, Any]:
@@ -719,7 +806,8 @@ def create_app(
         state = refinement_manager.snapshot()
         if state.owner_id != job_id:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이 분석 결과에는 진행 중인 AI 정리 작업이 없습니다.")
-        return _refinement_payload(analysis, refinement_manager.cancel())
+        state = refinement_manager.cancel()
+        return _refinement_payload(analysis, state, stored_result=stored_refinement_result(job_id, state))
 
     @app.get("/api/jobs")
     def jobs(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -819,6 +907,31 @@ def create_app(
         filename = f"{Path(job['source_name']).stem}-talktracker.md"
         return FileResponse(result_path, media_type="text/markdown; charset=utf-8", filename=filename)
 
+    @app.get("/api/jobs/{job_id}/ai-results/{kind}.md")
+    def download_ai_result_document(job_id: str, kind: str, _: None = Depends(require_access)) -> Response:
+        if kind not in {"original", "refined", "summary"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="요청한 결과 문서를 찾지 못했습니다.")
+        try:
+            analysis = job_manager.analysis_result(job_id)
+            job = job_manager.snapshot(job_id)
+        except JobNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
+        except JobStateError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        result = stored_refinement_result(job_id, refinement_manager.snapshot())
+        if not result:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="아직 내려받을 AI 결과 문서가 없습니다.")
+        content = render_result_documents(analysis, result).get(kind)
+        if content is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="선택하지 않은 결과 문서입니다.")
+        label = {"original": "original", "refined": "refined", "summary": "summary"}[kind]
+        filename = f"{Path(job['source_name']).stem}-{label}.md"
+        return Response(
+            content,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.delete("/api/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
     def delete_job(job_id: str, _: None = Depends(require_access)) -> None:
         try:
@@ -827,6 +940,8 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
         except JobStateError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        with refinement_results_lock:
+            refinement_results.pop(job_id, None)
 
     return app
 

@@ -169,7 +169,12 @@ class OpenAICompatibleLocalClient:
         messages: list[dict[str, str]],
         temperature: float = 0,
         max_tokens: int = 1_024,
+        json_mode: bool = False,
+        retry_on_length: bool = False,
+        on_length_retry: Callable[[int, int], None] | None = None,
+        on_length_retry_success: Callable[[int], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        _length_retry_attempted: bool = False,
     ) -> str:
         """Return a streamed text completion and close it when cancelled.
 
@@ -187,26 +192,29 @@ class OpenAICompatibleLocalClient:
             raise LocalLLMError("AI 정리에 사용할 모델을 선택해 주세요.")
         if not messages:
             raise LocalLLMError("AI 정리에 보낼 대화 내용을 찾지 못했습니다.")
+        requested_tokens = max(1, int(max_tokens))
         body = {
             "model": model,
             "messages": messages,
             "temperature": max(0, min(2, float(temperature))),
-            "max_tokens": max(1, int(max_tokens)),
+            "max_tokens": requested_tokens,
             "stream": True,
         }
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        http_request = Request(self.connection.endpoint("chat/completions"), data=data, method="POST")
-        http_request.add_header("Accept", "text/event-stream, application/json")
-        http_request.add_header("Content-Type", "application/json")
-        if self.connection.api_key:
-            http_request.add_header("Authorization", f"Bearer {self.connection.api_key}")
-
+        if json_mode:
+            # This is the standard Chat Completions JSON mode.  It makes a
+            # model's output contract explicit instead of relying only on a
+            # natural-language prompt.
+            body["response_format"] = {"type": "json_object"}
         try:
-            response = urlopen(http_request, timeout=max(self.timeout_seconds, 180.0))
-        except HTTPError as error:
-            raise LocalLLMHTTPError(error.code, _server_error_message(error)) from error
-        except (URLError, socket.timeout, TimeoutError, OSError) as error:
-            raise LocalLLMError("로컬 AI 서버에 연결할 수 없습니다. 서버 주소와 실행 상태를 확인해 주세요.") from error
+            response = self._open_completion_response(body)
+        except LocalLLMHTTPError as error:
+            if not json_mode or error.status_code not in {400, 422}:
+                raise
+            # A few otherwise compatible local servers reject the standard
+            # response_format field.  Retry once without it so those servers
+            # retain the existing prompt-only JSON behaviour.
+            fallback_body = {key: value for key, value in body.items() if key != "response_format"}
+            response = self._open_completion_response(fallback_body)
 
         done = Event()
 
@@ -221,6 +229,8 @@ class OpenAICompatibleLocalClient:
         watcher.start()
         chunks: list[str] = []
         fallback_lines: list[bytes] = []
+        saw_reasoning = False
+        finish_reasons: set[str] = set()
         try:
             while True:
                 if should_cancel and should_cancel():
@@ -249,6 +259,9 @@ class OpenAICompatibleLocalClient:
                 if not isinstance(event, dict):
                     continue
                 chunks.extend(_stream_content(event))
+                event_reasoning, event_finish_reasons = _completion_metadata(event, streaming=True)
+                saw_reasoning = saw_reasoning or event_reasoning
+                finish_reasons.update(event_finish_reasons)
         finally:
             done.set()
             response.close()
@@ -263,9 +276,48 @@ class OpenAICompatibleLocalClient:
                 raise LocalLLMResponseError("AI 정리 응답을 읽을 수 없습니다.") from error
             if isinstance(fallback, dict):
                 content = _completion_content(fallback)
+                fallback_reasoning, fallback_finish_reasons = _completion_metadata(fallback, streaming=False)
+                saw_reasoning = saw_reasoning or fallback_reasoning
+                finish_reasons.update(fallback_finish_reasons)
+        reached_length_limit = bool({"length", "max_tokens"} & finish_reasons)
+        if reached_length_limit:
+            retry_tokens = _expanded_token_limit(requested_tokens)
+            if retry_on_length and retry_tokens > requested_tokens:
+                if on_length_retry:
+                    on_length_retry(requested_tokens, retry_tokens)
+                content = self.create_chat_completion(
+                    model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=retry_tokens,
+                    json_mode=json_mode,
+                    retry_on_length=False,
+                    on_length_retry=on_length_retry,
+                    on_length_retry_success=on_length_retry_success,
+                    should_cancel=should_cancel,
+                    _length_retry_attempted=True,
+                )
+                if on_length_retry_success:
+                    on_length_retry_success(retry_tokens)
+                return content
+            raise LocalLLMResponseError(_length_limit_message(_length_retry_attempted))
         if not content:
-            raise LocalLLMResponseError("AI 정리 응답에 읽을 수 있는 내용이 없습니다.")
+            raise LocalLLMResponseError(_empty_completion_message(saw_reasoning, finish_reasons))
         return content
+
+    def _open_completion_response(self, body: dict[str, Any]):
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request = Request(self.connection.endpoint("chat/completions"), data=data, method="POST")
+        request.add_header("Accept", "text/event-stream, application/json")
+        request.add_header("Content-Type", "application/json")
+        if self.connection.api_key:
+            request.add_header("Authorization", f"Bearer {self.connection.api_key}")
+        try:
+            return urlopen(request, timeout=max(self.timeout_seconds, 180.0))
+        except HTTPError as error:
+            raise LocalLLMHTTPError(error.code, _server_error_message(error)) from error
+        except (URLError, socket.timeout, TimeoutError, OSError) as error:
+            raise LocalLLMError("로컬 AI 서버에 연결할 수 없습니다. 서버 주소와 실행 상태를 확인해 주세요.") from error
 
     def _request_json(
         self,
@@ -345,3 +397,52 @@ def _completion_content(payload: dict[str, Any]) -> str:
         return ""
     content = message.get("content")
     return content.strip() if isinstance(content, str) else ""
+
+
+def _completion_metadata(payload: dict[str, Any], *, streaming: bool) -> tuple[bool, set[str]]:
+    """Identify a reasoning-only or prematurely stopped OpenAI-style reply.
+
+    The reasoning text itself is deliberately not returned: it is not the
+    requested JSON result and may contain model-internal scratch work.
+    """
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return False, set()
+    saw_reasoning = False
+    finish_reasons: set[str] = set()
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            finish_reasons.add(finish_reason.lower())
+        section = choice.get("delta") if streaming else choice.get("message")
+        if not isinstance(section, dict):
+            continue
+        for field in ("reasoning_content", "reasoning"):
+            value = section.get(field)
+            if isinstance(value, str) and value.strip():
+                saw_reasoning = True
+    return saw_reasoning, finish_reasons
+
+
+def _empty_completion_message(saw_reasoning: bool, finish_reasons: set[str]) -> str:
+    if saw_reasoning:
+        return (
+            "로컬 AI가 추론 내용만 보내고 최종 결과 본문을 보내지 않았습니다. "
+            "서버의 추론 모드와 OpenAI 호환 응답 설정을 확인해 주세요."
+        )
+    return "로컬 AI가 비어 있는 응답을 반환했습니다. 모델 서버 로그와 채팅 완료 설정을 확인해 주세요."
+
+
+def _expanded_token_limit(current_limit: int) -> int:
+    """Return one bounded retry budget after an incomplete completion."""
+
+    return min(16_384, max(4_096, current_limit * 4))
+
+
+def _length_limit_message(retry_attempted: bool) -> str:
+    if retry_attempted:
+        return "응답 길이를 늘려 다시 시도했지만, 최종 결과를 만들기 전에 다시 한도에 도달했습니다."
+    return "로컬 AI가 최종 결과를 만들기 전에 응답 길이 제한에 도달했습니다."

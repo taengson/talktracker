@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 PROMPT_VERSION = "2026-10-19.1"
 ProgressCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
+LengthRetrySuccessCallback = Callable[[int], None]
 
 
 class RefinementError(LocalLLMError):
@@ -35,13 +36,15 @@ class RefinementCancelled(RefinementError):
 class ResultSelection:
     """The output sections explicitly requested by a user."""
 
-    original: bool = True
+    original: bool = False
     refined: bool = False
     summary: bool = False
 
     def validate(self) -> None:
         if not (self.original or self.refined or self.summary):
             raise RefinementError("결과로 받을 항목을 하나 이상 선택해 주세요.")
+        if self.original and self.needs_ai:
+            raise RefinementError("원본 전사 메시지는 다듬은 대화 또는 요약과 함께 선택할 수 없습니다.")
 
     @property
     def needs_ai(self) -> bool:
@@ -50,10 +53,11 @@ class ResultSelection:
 
 @dataclass(frozen=True)
 class SpeakerGuide:
-    """Optional human context that is sent only with the current request."""
+    """Optional display name and context for one detected speaker."""
 
     speaker: str
-    guidance: str
+    guidance: str = ""
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,8 +72,9 @@ class AIRefinementRequest:
         for guide in self.speaker_guides:
             speaker = guide.speaker.strip()
             guidance = guide.guidance.strip()
-            if speaker and guidance:
-                guides.append(SpeakerGuide(speaker=speaker, guidance=guidance))
+            display_name = guide.display_name.strip()
+            if speaker and (guidance or display_name):
+                guides.append(SpeakerGuide(speaker=speaker, guidance=guidance, display_name=display_name))
         return AIRefinementRequest(
             selection=self.selection,
             background=self.background.strip(),
@@ -92,10 +97,40 @@ class AIRefinementResult:
 
     selection: ResultSelection
     refined_text_by_segment_id: dict[str, str] = field(default_factory=dict)
+    speaker_display_names: dict[str, str] = field(default_factory=dict)
     summary: ConversationSummary | None = None
     warnings: tuple[str, ...] = ()
     prompt_version: str = PROMPT_VERSION
     model: str = ""
+
+
+def merge_ai_refinement_results(
+    previous: AIRefinementResult | None,
+    latest: AIRefinementResult,
+) -> AIRefinementResult:
+    """Keep prior AI documents while replacing only newly requested ones.
+
+    A user can create a refined conversation first and request a summary in a
+    later pass.  Those are separate documents for the same immutable analysis,
+    so a summary-only pass must not discard the already validated refinement.
+    """
+
+    if previous is None:
+        return latest
+    refined_requested = previous.selection.refined or latest.selection.refined
+    summary_requested = previous.selection.summary or latest.selection.summary
+    refined_text = latest.refined_text_by_segment_id if latest.selection.refined else previous.refined_text_by_segment_id
+    summary = latest.summary if latest.selection.summary else previous.summary
+    warnings = tuple(dict.fromkeys((*previous.warnings, *latest.warnings)))
+    return AIRefinementResult(
+        selection=ResultSelection(refined=refined_requested, summary=summary_requested),
+        refined_text_by_segment_id=refined_text,
+        speaker_display_names={**previous.speaker_display_names, **latest.speaker_display_names},
+        summary=summary,
+        warnings=warnings,
+        prompt_version=latest.prompt_version,
+        model=latest.model or previous.model,
+    )
 
 
 @dataclass(frozen=True)
@@ -116,6 +151,8 @@ class TranscriptRefiner:
         request: AIRefinementRequest,
         *,
         model: str,
+        response_token_limit: int | None = None,
+        on_length_retry_success: LengthRetrySuccessCallback | None = None,
         progress: ProgressCallback | None = None,
         should_cancel: CancelCallback | None = None,
     ) -> AIRefinementResult:
@@ -127,15 +164,32 @@ class TranscriptRefiner:
         if not self.client:
             raise RefinementError("로컬 AI 연결을 확인한 뒤 다시 시도해 주세요.")
         self._raise_if_cancelled(should_cancel)
-        if progress:
-            progress("AI가 짧은 전사 전체를 읽고 정리하고 있습니다…")
 
         segments = tuple(_Segment(f"s-{index:04d}", utterance) for index, utterance in enumerate(analysis.utterances, start=1))
+        estimated_limit = max(1_024, min(8_192, 512 + sum(len(segment.utterance.text) for segment in segments) * 2))
+        remembered_limit = max(0, int(response_token_limit or 0))
+        requested_limit = max(estimated_limit, remembered_limit)
+        if progress:
+            if remembered_limit:
+                progress("이전에 확인한 응답 길이 설정으로 AI 정리를 시작하고 있습니다…")
+            else:
+                progress("AI가 짧은 전사 전체를 읽고 정리하고 있습니다…")
+        successful_retry_limits: list[int] = []
         response = self.client.create_chat_completion(
             model,
             messages=self._messages(segments, normalized),
             temperature=0,
-            max_tokens=max(1_024, min(8_192, 512 + sum(len(segment.utterance.text) for segment in segments) * 2)),
+            max_tokens=requested_limit,
+            json_mode=True,
+            retry_on_length=True,
+            on_length_retry=(
+                lambda _current_limit, _retry_limit: progress(
+                    "AI 응답 길이 한도에 도달해 더 큰 설정으로 다시 정리하고 있습니다. 완료되면 이 연결에 기억합니다…"
+                )
+                if progress
+                else None
+            ),
+            on_length_retry_success=successful_retry_limits.append,
             should_cancel=should_cancel,
         )
         self._raise_if_cancelled(should_cancel)
@@ -148,20 +202,27 @@ class TranscriptRefiner:
         summary = _validated_summary(payload) if normalized.selection.summary else None
         if progress:
             progress("AI 정리 결과를 검증하고 있습니다…")
-        return AIRefinementResult(
+        result = AIRefinementResult(
             selection=normalized.selection,
             refined_text_by_segment_id=refined,
+            speaker_display_names={
+                guide.speaker: guide.display_name for guide in normalized.speaker_guides if guide.display_name
+            },
             summary=summary,
             warnings=tuple(warnings),
             model=model.strip(),
         )
+        if successful_retry_limits and on_length_retry_success:
+            on_length_retry_success(successful_retry_limits[-1])
+        return result
 
     @staticmethod
     def _messages(segments: tuple[_Segment, ...], request: AIRefinementRequest) -> list[dict[str, str]]:
         system = (
             "You refine a Korean conversation transcript. Use only the provided transcript and optional context. "
             "Do not invent facts, speakers, times, names, decisions, or action items. "
-            "Speaker guides are only hints for wording; never output them. "
+            "Use a supplied display_name as the speaker label in any generated wording about that speaker. "
+            "Speaker guidance is only context and must not be output as a separate field. "
             "Keep each segment's meaning. Return JSON only, with no markdown fence or explanation. "
             "When refinement is requested, return every requested segment_id exactly once with a non-empty refined_text. "
             "When summary is requested, return a summary object with overview (string), key_points, decisions, "
@@ -175,7 +236,8 @@ class TranscriptRefiner:
             },
             "conversation_background": request.background,
             "speaker_guides": [
-                {"speaker": guide.speaker, "guidance": guide.guidance} for guide in request.speaker_guides
+                {"speaker": guide.speaker, "display_name": guide.display_name, "guidance": guide.guidance}
+                for guide in request.speaker_guides
             ],
             "segments": [
                 {"segment_id": segment.id, "speaker": segment.utterance.speaker, "text": segment.utterance.text}
@@ -208,7 +270,7 @@ def render_original_conversation(analysis: "AnalysisResult") -> str:
 
 
 def render_refined_conversation(analysis: "AnalysisResult", result: AIRefinementResult) -> str:
-    return _render_conversation(analysis.utterances, result.refined_text_by_segment_id)
+    return _render_conversation(analysis.utterances, result.refined_text_by_segment_id, result.speaker_display_names)
 
 
 def render_summary(summary: ConversationSummary) -> str:
@@ -255,13 +317,39 @@ def render_selected_markdown(analysis: "AnalysisResult", result: AIRefinementRes
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_conversation(utterances: list["Utterance"], replacements: dict[str, str]) -> str:
+def render_result_documents(analysis: "AnalysisResult", result: AIRefinementResult | None = None) -> dict[str, str]:
+    """Create one independent Markdown document for each available result."""
+
+    documents = {"original": analysis.to_markdown()}
+    if not result:
+        return documents
+
+    metadata = [f"- 원본 파일: {analysis.source_name}", f"- 길이: {_format_time(analysis.duration)}"]
+    if result.model:
+        metadata.extend((f"- AI 모델: {result.model}", f"- 프롬프트 버전: {result.prompt_version}"))
+    warnings = ["", "## AI 처리 참고", "", *(f"- {warning}" for warning in result.warnings)] if result.warnings else []
+    if result.selection.refined:
+        documents["refined"] = "\n".join(
+            ["# 다듬은 대화", "", *metadata, "", "## 대화 내용", "", render_refined_conversation(analysis, result), *warnings]
+        ).rstrip() + "\n"
+    if result.selection.summary and result.summary:
+        documents["summary"] = "\n".join(
+            ["# 요약", "", *metadata, "", "## 요약 내용", "", render_summary(result.summary), *warnings]
+        ).rstrip() + "\n"
+    return documents
+
+
+def _render_conversation(
+    utterances: list["Utterance"], replacements: dict[str, str], speaker_display_names: dict[str, str] | None = None
+) -> str:
     lines: list[str] = []
+    speaker_display_names = speaker_display_names or {}
     for index, utterance in enumerate(utterances, start=1):
         text = replacements.get(f"s-{index:04d}", utterance.text)
+        speaker = speaker_display_names.get(utterance.speaker, utterance.speaker)
         lines.extend(
             [
-                f"({utterance.speaker})  {_format_time(utterance.start)} – {_format_time(utterance.end)}",
+                f"({speaker})  {_format_time(utterance.start)} – {_format_time(utterance.end)}",
                 text,
                 "",
             ]

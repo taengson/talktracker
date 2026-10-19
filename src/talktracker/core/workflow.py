@@ -8,7 +8,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable
 
 from .llm_client import LocalLLMCancelled, LocalLLMConnection, LocalLLMConnectionTest, LocalLLMError, LocalLLMModel, OpenAICompatibleLocalClient
-from .llm_config import LocalLLMSettings, LocalLLMSettingsStore
+from .llm_config import LocalLLMResponseTokenLimit, LocalLLMSettings, LocalLLMSettingsStore
 from .refinement import AIRefinementRequest, AIRefinementResult, RefinementCancelled, RefinementError, TranscriptRefiner
 
 if TYPE_CHECKING:
@@ -62,11 +62,13 @@ class LocalLLMConnectionManager:
         result = self._client_factory(connection).test_connection(model)
         with self._lock:
             recent_base_urls = self._settings.recent_base_urls
+            response_token_limits = self._settings.response_token_limits
         settings = self._store.save(
             LocalLLMSettings(
                 base_url=connection.base_url,
                 model=result.model,
                 recent_base_urls=recent_base_urls,
+                response_token_limits=response_token_limits,
             )
         )
         with self._lock:
@@ -86,6 +88,47 @@ class LocalLLMConnectionManager:
                 raise LocalLLMError("로컬 AI 연결을 확인한 뒤 AI 정리를 실행해 주세요.")
             connection = LocalLLMConnection(self._settings.base_url, self._api_key)
         return self._client_factory(connection)
+
+    def remember_response_token_limit(self, max_tokens: int, *, base_url: str | None = None, model: str | None = None) -> None:
+        """Persist a budget only after a retry completed successfully.
+
+        The record is tied to the server address and model ID, not an API key.
+        A settings-write failure must never turn an otherwise successful AI
+        result into a failed operation.
+        """
+
+        try:
+            learned_limit = int(max_tokens)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            current = self._settings
+            target_base_url = (base_url or current.base_url).strip()
+            target_model = (model or current.model).strip()
+            if not target_base_url or not target_model:
+                return
+            if target_base_url != current.base_url or target_model != current.model:
+                return
+            if current.response_token_limit_for(target_base_url, target_model) == learned_limit:
+                return
+            learned = LocalLLMResponseTokenLimit(target_base_url, target_model, learned_limit)
+            retained_limits = tuple(
+                item
+                for item in current.response_token_limits
+                if (item.base_url, item.model) != (target_base_url, target_model)
+            )
+            try:
+                settings = self._store.save(
+                    LocalLLMSettings(
+                        base_url=current.base_url,
+                        model=current.model,
+                        recent_base_urls=current.recent_base_urls,
+                        response_token_limits=(learned, *retained_limits),
+                    )
+                )
+            except OSError:
+                return
+            self._settings = settings
 
     def mark_disconnected(self, message: str = "로컬 AI 연결 확인 필요") -> None:
         """Clear only volatile connectivity; saved endpoint/model remain available."""
@@ -188,6 +231,7 @@ class AIRefinementManager:
     ) -> None:
         acquired = False
         try:
+            settings = self._connection_manager.snapshot().settings
             if request.selection.needs_ai:
                 acquired = self._execution_lock.acquire(blocking=False)
                 if not acquired:
@@ -199,7 +243,13 @@ class AIRefinementManager:
             result = refiner.refine(
                 analysis,
                 request,
-                model=self._connection_manager.snapshot().settings.model,
+                model=settings.model,
+                response_token_limit=settings.response_token_limit_for(settings.base_url, settings.model),
+                on_length_retry_success=lambda max_tokens: self._connection_manager.remember_response_token_limit(
+                    max_tokens,
+                    base_url=settings.base_url,
+                    model=settings.model,
+                ),
                 progress=self._update_progress,
                 should_cancel=cancel_event.is_set,
             )

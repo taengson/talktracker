@@ -46,7 +46,19 @@ class FakeLocalLLMClient:
     def test_connection(self, model: str) -> LocalLLMConnectionTest:
         return LocalLLMConnectionTest(model=model, response_preview="OK")
 
-    def create_chat_completion(self, model: str, *, messages, temperature: float, max_tokens: int, should_cancel=None) -> str:
+    def create_chat_completion(
+        self,
+        model: str,
+        *,
+        messages,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool = False,
+        retry_on_length: bool = False,
+        on_length_retry=None,
+        on_length_retry_success=None,
+        should_cancel=None,
+    ) -> str:
         if should_cancel and should_cancel():
             from talktracker.core.llm_client import LocalLLMCancelled
 
@@ -215,6 +227,9 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('id="llm-url-options"', page)
         self.assertIn('id="ai-refinement"', page)
         self.assertIn('/ai-refinement/cancel', page)
+        self.assertNotIn('id="ai-original"', page)
+        self.assertIn("원본 전사는 분석 결과로 자동 보존됩니다.", page)
+        self.assertIn("AI_RESULT_LABELS", page)
         self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
         protected_page = _index_page(access_token_required=True)
@@ -273,7 +288,7 @@ class ServerPageTests(unittest.TestCase):
 
             self.assertNotIn("temporary-secret", settings_path.read_text(encoding="utf-8"))
 
-    def test_web_ai_refinement_returns_only_selected_sections(self) -> None:
+    def test_web_ai_refinement_preserves_separate_results_across_requests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manager = JobManager(root, engine_factory=lambda _root, _profile: RefinableFakeEngine())
@@ -299,9 +314,9 @@ class ServerPageTests(unittest.TestCase):
                     started = client.post(
                         f"/api/jobs/{job.id}/ai-refinement",
                         json={
-                            "selection": {"original": False, "refined": True, "summary": True},
+                            "selection": {"refined": True, "summary": False},
                             "background": "프로젝트 회의",
-                            "speaker_guides": [{"speaker": "화자 1", "guidance": "프로젝트 매니저"}],
+                            "speaker_guides": [{"speaker": "화자 1", "display_name": "손태영", "guidance": "프로젝트 매니저"}],
                         },
                     )
                     self.assertEqual(started.status_code, 200)
@@ -311,11 +326,40 @@ class ServerPageTests(unittest.TestCase):
                         time.sleep(0.02)
                         status_payload = client.get(f"/api/jobs/{job.id}/ai-refinement").json()
                     self.assertEqual(status_payload["state"], "completed")
+                    self.assertIn("elapsed_seconds", status_payload)
+                    self.assertGreaterEqual(status_payload["elapsed_seconds"], 0)
                     sections = status_payload["result"]["sections"]
-                    self.assertNotIn("original", sections)
+                    self.assertIn("original", sections)
+                    self.assertIn("다음 주까지 초안을 준비하겠습니다.", sections["refined"])
+                    self.assertIn("(손태영)", sections["refined"])
+                    self.assertNotIn("summary", sections)
+                    self.assertNotIn("프로젝트 매니저", str(status_payload))
+                    summary_started = client.post(
+                        f"/api/jobs/{job.id}/ai-refinement",
+                        json={
+                            "selection": {"refined": False, "summary": True},
+                            "background": "프로젝트 회의",
+                            "speaker_guides": [{"speaker": "화자 1", "display_name": "손태영", "guidance": "프로젝트 매니저"}],
+                        },
+                    )
+                    self.assertEqual(summary_started.status_code, 200)
+                    status_payload = summary_started.json()
+                    while status_payload["active"] and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                        status_payload = client.get(f"/api/jobs/{job.id}/ai-refinement").json()
+                    self.assertEqual(status_payload["state"], "completed")
+                    sections = status_payload["result"]["sections"]
                     self.assertIn("다음 주까지 초안을 준비하겠습니다.", sections["refined"])
                     self.assertIn("초안 준비 일정과 확인 작업을 논의했다.", sections["summary"])
-                    self.assertNotIn("프로젝트 매니저", str(status_payload))
+                    original_document = client.get(f"/api/jobs/{job.id}/ai-results/original.md")
+                    self.assertEqual(original_document.status_code, 200)
+                    self.assertIn("다음주 까지 초안 준비 할게요", original_document.text)
+                    refined_document = client.get(f"/api/jobs/{job.id}/ai-results/refined.md")
+                    self.assertEqual(refined_document.status_code, 200)
+                    self.assertIn("# 다듬은 대화", refined_document.text)
+                    summary_document = client.get(f"/api/jobs/{job.id}/ai-results/summary.md")
+                    self.assertEqual(summary_document.status_code, 200)
+                    self.assertIn("# 요약", summary_document.text)
             finally:
                 manager.shutdown()
 

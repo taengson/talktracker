@@ -105,10 +105,12 @@ download_prepared_whisper() {
   echo "Completing pre-converted $whisper_repository"
   echo "Destination: $destination"
   echo "Missing files: ${missing_files[*]}"
-  "$hugging_face" download "$whisper_repository" \
+  # The Hugging Face CLI parses positional file names before its options.
+  # Keeping them directly after the repository also works across the CLI
+  # versions installed by our supported dependency scripts.
+  "$hugging_face" download "$whisper_repository" "${missing_files[@]}" \
     --local-dir "$destination" \
-    --force-download \
-    "${missing_files[@]}"
+    --force-download
 
   for file in "${required_files[@]}"; do
     [[ -f "$destination/$file" ]] || {
