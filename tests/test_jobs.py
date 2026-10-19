@@ -238,6 +238,10 @@ class ServerPageTests(unittest.TestCase):
         network_page = _index_page(local_llm_available=False)
         self.assertNotIn('id="local-ai"', network_page)
         self.assertNotIn('id="llm-api-key"', network_page)
+        closed_network_page = _index_page(local_llm_over_network=True)
+        self.assertIn('id="local-ai"', closed_network_page)
+        self.assertIn("사내 폐쇄망 모드입니다.", closed_network_page)
+        self.assertIn("API 키와 AI 요청은 네트워크를 통해 서버로 전달됩니다.", closed_network_page)
 
     def test_local_llm_api_lists_and_verifies_without_persisting_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -397,6 +401,32 @@ class ServerPageTests(unittest.TestCase):
             server_main()
 
         self.assertEqual(uvicorn_run.call_args.kwargs["host"], "0.0.0.0")
+
+    def test_internal_network_option_enables_local_ai_controls(self) -> None:
+        uvicorn_run = Mock()
+        create_app_mock = Mock(return_value=object())
+        with (
+            patch("talktracker.server.create_app", create_app_mock),
+            patch(
+                "sys.argv",
+                ["talktracker.server", "--host", "0.0.0.0", "--allow-local-ai-over-network"],
+            ),
+            patch.dict("os.environ", {"TALKTRACKER_WEB_TOKEN": ""}, clear=False),
+            patch.dict("sys.modules", {"uvicorn": SimpleNamespace(run=uvicorn_run)}),
+        ):
+            server_main()
+
+        self.assertEqual(uvicorn_run.call_args.kwargs["host"], "0.0.0.0")
+        self.assertTrue(create_app_mock.call_args.kwargs["local_llm_enabled"])
+        self.assertTrue(create_app_mock.call_args.kwargs["local_llm_over_network"])
+
+    def test_internal_network_without_the_option_rejects_local_ai_api(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(create_app(project_root=Path(directory), local_llm_enabled=False)) as client:
+                response = client.get("/api/local-llm")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("--allow-local-ai-over-network", response.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -281,7 +281,12 @@ def _server_unavailable_page() -> str:
 </body></html>"""
 
 
-def _index_page(*, access_token_required: bool = False, local_llm_available: bool = True) -> str:
+def _index_page(
+    *,
+    access_token_required: bool = False,
+    local_llm_available: bool = True,
+    local_llm_over_network: bool = False,
+) -> str:
     """Keep the initial client self-contained; no frontend build is required."""
 
     page = """<!doctype html>
@@ -582,17 +587,21 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   Promise.all([loadProfiles(), loadJobs(), $("local-ai") ? loadLlmConnection() : Promise.resolve()]).catch((error) => { $("upload-status").textContent = error.message; });
 </script>
 </body></html>"""
+    local_llm_network_notice = """
+    <p class="notice error"><strong>사내 폐쇄망 모드입니다.</strong> 이 웹 화면에서 입력한 API 키와 AI 요청은 네트워크를 통해 서버로 전달됩니다. 신뢰하는 내부망에서만 사용하세요.</p>
+    """ if local_llm_over_network else ""
     local_llm_section = """
   <section id="local-ai">
     <h2>로컬 AI 연결</h2>
     <p class="hint">현재 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다. AI 정리 기능을 사용할 때 전사문은 선택한 서버로 전달됩니다. 연결에 성공한 서버 주소와 모델을 기억하며 API 키는 이번 연결 확인에만 사용합니다.</p>
+    __LOCAL_LLM_NETWORK_NOTICE__
     <div class="grid"><div><label for="llm-url">서버 주소 (최근 성공 목록)</label><input id="llm-url" type="text" inputmode="url" list="llm-url-options" placeholder="http://127.0.0.1:8000"><datalist id="llm-url-options"></datalist></div>
     <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
     <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
     <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
     <p id="llm-status" class="notice">로컬 AI 연결 상태를 확인하고 있습니다…</p>
   </section>
-    """ if local_llm_available else ""
+    """.replace("__LOCAL_LLM_NETWORK_NOTICE__", local_llm_network_notice) if local_llm_available else ""
     token_section = """
       <label for="token">접근 토큰</label><input id="token" type="password" autocomplete="off" placeholder="서버에 설정한 토큰을 입력한 뒤 다른 곳을 클릭하세요">
       <p class="hint">이 서버는 로컬 네트워크에 열려 있어 접근 토큰이 필요합니다.</p>
@@ -610,6 +619,7 @@ def create_app(
     llm_connection_manager: LocalLLMConnectionManager | None = None,
     ai_refinement_manager: AIRefinementManager | None = None,
     local_llm_enabled: bool = True,
+    local_llm_over_network: bool = False,
 ) -> FastAPI:
     """Create a server application without importing the Tkinter GUI."""
 
@@ -642,6 +652,7 @@ def create_app(
     app.state.ai_refinement_manager = refinement_manager
     app.state.ai_refinement_results = refinement_results
     app.state.local_llm_enabled = local_llm_enabled
+    app.state.local_llm_over_network = local_llm_over_network
     app.state.access_token_required = bool(token)
     app.state.max_upload_bytes = max_upload_mb * 1024 * 1024
 
@@ -657,7 +668,10 @@ def create_app(
 
     def require_local_llm() -> None:
         if not local_llm_enabled:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="로컬 AI 연결은 이 PC에서 연 웹 화면에서만 사용할 수 있습니다.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="이 웹 서버에서는 로컬 AI 연결이 비활성화되어 있습니다. 폐쇄망에서 사용하려면 서버를 --allow-local-ai-over-network 옵션과 함께 다시 시작하세요.",
+            )
 
     def snapshot_or_404(job_id: str) -> dict[str, Any]:
         try:
@@ -691,7 +705,11 @@ def create_app(
         profiles = _profile_payload(project_root)
         if not any(profile["available"] for profile in profiles):
             return _server_unavailable_page()
-        return _index_page(access_token_required=bool(token), local_llm_available=local_llm_enabled)
+        return _index_page(
+            access_token_required=bool(token),
+            local_llm_available=local_llm_enabled,
+            local_llm_over_network=local_llm_over_network,
+        )
 
     @app.get("/api/health")
     def health(_: None = Depends(require_access)) -> dict[str, Any]:
@@ -759,7 +777,11 @@ def create_app(
         }
 
     @app.get("/api/jobs/{job_id}/ai-refinement")
-    def ai_refinement_status(job_id: str, _: None = Depends(require_access)) -> dict[str, Any]:
+    def ai_refinement_status(
+        job_id: str,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
         try:
             analysis = job_manager.analysis_result(job_id)
         except JobNotFoundError as error:
@@ -769,7 +791,12 @@ def create_app(
         return refinement_payload_for_job(job_id, analysis)
 
     @app.post("/api/jobs/{job_id}/ai-refinement")
-    async def start_ai_refinement(job_id: str, request: Request, _: None = Depends(require_access)) -> dict[str, Any]:
+    async def start_ai_refinement(
+        job_id: str,
+        request: Request,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
         try:
             analysis = job_manager.analysis_result(job_id)
         except JobNotFoundError as error:
@@ -796,7 +823,11 @@ def create_app(
         return _refinement_payload(analysis, state, stored_result=stored_result)
 
     @app.post("/api/jobs/{job_id}/ai-refinement/cancel")
-    def cancel_ai_refinement(job_id: str, _: None = Depends(require_access)) -> dict[str, Any]:
+    def cancel_ai_refinement(
+        job_id: str,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
         try:
             analysis = job_manager.analysis_result(job_id)
         except JobNotFoundError as error:
@@ -908,7 +939,12 @@ def create_app(
         return FileResponse(result_path, media_type="text/markdown; charset=utf-8", filename=filename)
 
     @app.get("/api/jobs/{job_id}/ai-results/{kind}.md")
-    def download_ai_result_document(job_id: str, kind: str, _: None = Depends(require_access)) -> Response:
+    def download_ai_result_document(
+        job_id: str,
+        kind: str,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> Response:
         if kind not in {"original", "refined", "summary"}:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="요청한 결과 문서를 찾지 못했습니다.")
         try:
@@ -960,16 +996,29 @@ def _parse_arguments() -> argparse.Namespace:
         type=int,
         default=_integer_setting("TALKTRACKER_WEB_RETENTION_DAYS", DEFAULT_RETENTION_DAYS, minimum=1),
     )
+    parser.add_argument(
+        "--allow-local-ai-over-network",
+        action="store_true",
+        help="폐쇄망에서만 로컬 AI 연결 입력을 웹 화면에 표시합니다.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     arguments = _parse_arguments()
     access_token = os.environ.get("TALKTRACKER_WEB_TOKEN", "").strip() or None
-    if not _is_loopback_host(arguments.host) and not access_token:
+    loopback_only = _is_loopback_host(arguments.host)
+    local_llm_over_network = not loopback_only and arguments.allow_local_ai_over_network
+    if not loopback_only and not access_token:
         print(
             "Warning: the server is open to the local network without an access token. "
             "Use only on a trusted internal network; never expose this address to the internet.",
+            flush=True,
+        )
+    if local_llm_over_network:
+        print(
+            "Warning: local AI connection controls are enabled over the network. "
+            "API keys and AI requests travel over this network; use only on a trusted internal network.",
             flush=True,
         )
 
@@ -980,7 +1029,8 @@ def main() -> None:
         access_token=access_token,
         max_upload_mb=arguments.max_upload_mb,
         retention_days=arguments.retention_days,
-        local_llm_enabled=_is_loopback_host(arguments.host),
+        local_llm_enabled=loopback_only or local_llm_over_network,
+        local_llm_over_network=local_llm_over_network,
     )
     uvicorn.run(app, host=arguments.host, port=arguments.port, log_level="info")
 
