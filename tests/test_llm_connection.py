@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from urllib.error import HTTPError
 
 from talktracker.core.llm_client import (
     LocalLLMConnection,
+    LocalLLMCancelled,
     LocalLLMError,
     LocalLLMHTTPError,
     LocalLLMModel,
@@ -26,6 +28,8 @@ from talktracker.main import _llm_operation_error_message, _unexpected_llm_opera
 class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     received_model = ""
     received_authorization = ""
+    stream_delay_seconds = 0.0
+    stream_started = Event()
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path != "/v1/models":
@@ -49,6 +53,14 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])).decode("utf-8"))
         type(self).received_model = body["model"]
         type(self).received_authorization = self.headers.get("Authorization", "")
+        if body.get("stream") and type(self).stream_delay_seconds:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.flush()
+            type(self).stream_started.set()
+            time.sleep(type(self).stream_delay_seconds)
+            return
         self._write_json({"choices": [{"message": {"content": "OK"}}]})
 
     def log_message(self, _format: str, *_args: object) -> None:
@@ -67,6 +79,8 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
     def setUp(self) -> None:
         _OpenAICompatibleHandler.received_model = ""
         _OpenAICompatibleHandler.received_authorization = ""
+        _OpenAICompatibleHandler.stream_delay_seconds = 0.0
+        _OpenAICompatibleHandler.stream_started.clear()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OpenAICompatibleHandler)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -88,6 +102,40 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(result.response_preview, "OK")
         self.assertEqual(_OpenAICompatibleHandler.received_model, "talktracker-test")
         self.assertEqual(_OpenAICompatibleHandler.received_authorization, "Bearer temporary-secret")
+
+    def test_streamed_completion_accepts_servers_that_return_regular_json(self) -> None:
+        content = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+            "talktracker-test",
+            messages=[{"role": "user", "content": "JSON만 답해"}],
+        )
+
+        self.assertEqual(content, "OK")
+        self.assertEqual(_OpenAICompatibleHandler.received_model, "talktracker-test")
+
+    def test_streamed_completion_closes_when_cancelled(self) -> None:
+        _OpenAICompatibleHandler.stream_delay_seconds = 1.5
+        cancelled = Event()
+        captured: list[Exception] = []
+        client = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url))
+
+        def run() -> None:
+            try:
+                client.create_chat_completion(
+                    "talktracker-test",
+                    messages=[{"role": "user", "content": "잠시 기다려"}],
+                    should_cancel=cancelled.is_set,
+                )
+            except Exception as error:  # Assert after the worker returns.
+                captured.append(error)
+
+        worker = Thread(target=run)
+        worker.start()
+        self.assertTrue(_OpenAICompatibleHandler.stream_started.wait(timeout=1))
+        cancelled.set()
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(captured), 1)
+        self.assertIsInstance(captured[0], LocalLLMCancelled)
 
     def test_trusted_network_openai_compatible_server_urls_are_accepted(self) -> None:
         self.assertEqual(normalize_local_server_url("http://localhost:8080"), "http://localhost:8080/v1")

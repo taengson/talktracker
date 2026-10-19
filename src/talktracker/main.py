@@ -16,7 +16,17 @@ from typing import TYPE_CHECKING, Any, Callable
 from tkinter import filedialog, messagebox, ttk
 
 from .core.llm_client import LocalLLMError, LocalLLMHTTPError, LocalLLMModel, LocalLLMResponseError
-from .core.workflow import LocalLLMConnectionManager
+from .core.refinement import (
+    AIRefinementRequest,
+    AIRefinementResult,
+    ResultSelection,
+    SpeakerGuide,
+    render_original_conversation,
+    render_refined_conversation,
+    render_selected_markdown,
+    render_summary,
+)
+from .core.workflow import AIRefinementBusyError, AIRefinementManager, LocalLLMConnectionManager
 from .core.models import (
     WHISPER_PROFILES,
     WhisperProfile,
@@ -130,6 +140,9 @@ class TalkTrackerApp(tk.Tk):
         self.model_setup_log: tk.Text | None = None
         self.model_setup_progress: ttk.Progressbar | None = None
         self.llm_connection_manager = LocalLLMConnectionManager()
+        self.ai_refinement_manager = AIRefinementManager(self.llm_connection_manager)
+        self.ai_refinement_result: AIRefinementResult | None = None
+        self.ai_refinement_running = False
         self.llm_connection_events: Queue[tuple[str, Any]] = Queue()
         self.llm_connection_operation_active = False
         self.llm_connection_dialog: tk.Toplevel | None = None
@@ -143,6 +156,11 @@ class TalkTrackerApp(tk.Tk):
         self.status_text = tk.StringVar(value="파일을 선택하면 동작 확인을 시작할 수 있습니다.")
         self.elapsed_text = tk.StringVar(value="")
         self.progress_value = tk.DoubleVar(value=0)
+        self.ai_include_original = tk.BooleanVar(value=True)
+        self.ai_include_refined = tk.BooleanVar(value=False)
+        self.ai_include_summary = tk.BooleanVar(value=False)
+        self.ai_status_text = tk.StringVar(value="분석이 끝나면 AI로 만들 결과를 선택할 수 있습니다.")
+        self.ai_speaker_guides: dict[str, tk.StringVar] = {}
         self._stage_message = self.status_text.get()
         self._stage_is_animated = False
         self._analysis_started_at: float | None = None
@@ -1338,6 +1356,275 @@ class TalkTrackerApp(tk.Tk):
             "처리 순서: 음성 정규화 → Nemotron 화자 분리 → Whisper 전사 → 시간 기준 결합"
         )
 
+        self.ai_refinement_frame = tk.Frame(card, bg="#F7FBF9", highlightbackground=self.LINE, highlightthickness=1, padx=15, pady=13)
+        self.ai_refinement_frame.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        self.ai_refinement_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            self.ai_refinement_frame,
+            text="AI로 결과 정리",
+            bg="#F7FBF9",
+            fg=self.NAVY,
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            self.ai_refinement_frame,
+            text="원본 전사는 바뀌지 않습니다. 다듬은 대화·요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 안내 입력이 전달됩니다.",
+            bg="#F7FBF9",
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            justify="left",
+            wraplength=720,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+        choices = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
+        choices.grid(row=2, column=0, sticky="w")
+        self.ai_choice_buttons: list[tk.Checkbutton] = []
+        for label, variable in (
+            ("원본 전사 메시지", self.ai_include_original),
+            ("다듬은 대화", self.ai_include_refined),
+            ("요약", self.ai_include_summary),
+        ):
+            choice = tk.Checkbutton(
+                choices,
+                text=label,
+                variable=variable,
+                command=self._toggle_ai_context,
+                bg="#F7FBF9",
+                fg=self.INK,
+                activebackground="#F7FBF9",
+                activeforeground=self.INK,
+                selectcolor=self.PAPER,
+                font=("Segoe UI", 9, "bold"),
+                cursor="hand2",
+            )
+            choice.pack(side="left", padx=(0, 16))
+            self.ai_choice_buttons.append(choice)
+
+        self.ai_context_frame = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
+        self.ai_context_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.ai_context_frame.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            self.ai_context_frame,
+            text="대화의 목적·배경 안내 (선택)",
+            bg="#F7FBF9",
+            fg=self.INK,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.ai_background_input = tk.Text(
+            self.ai_context_frame,
+            height=3,
+            wrap="word",
+            bg=self.PAPER,
+            fg=self.INK,
+            font=("Segoe UI", 9),
+            relief="solid",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#B8CCC7",
+            highlightcolor=self.TEAL,
+            padx=8,
+            pady=6,
+        )
+        self.ai_background_input.grid(row=1, column=0, sticky="ew", pady=(4, 3))
+        tk.Label(
+            self.ai_context_frame,
+            text="회의 목적, 참여자 역할, 프로젝트명, 약어·고유명사를 자세히 적으면 전사 보정과 요약이 더 정확해집니다. 이 입력도 로컬 AI 서버에만 전달됩니다.",
+            bg="#F7FBF9",
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            justify="left",
+            wraplength=720,
+        ).grid(row=2, column=0, sticky="w")
+        self.ai_speaker_guide_frame = tk.Frame(self.ai_context_frame, bg="#F7FBF9")
+        self.ai_speaker_guide_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.ai_speaker_guide_frame.grid_columnconfigure(1, weight=1)
+
+        ai_actions = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
+        ai_actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        ai_actions.grid_columnconfigure(0, weight=1)
+        tk.Label(ai_actions, textvariable=self.ai_status_text, bg="#F7FBF9", fg=self.TEAL_DARK, font=("Segoe UI", 8, "bold"), anchor="w").grid(
+            row=0, column=0, sticky="ew"
+        )
+        self.ai_run_button = self._button(ai_actions, "선택한 결과 만들기", self.start_ai_refinement, primary=True, width=16)
+        self.ai_run_button.grid(row=0, column=1, padx=(10, 8))
+        self.ai_cancel_button = self._button(ai_actions, "AI 정리 중단", self.cancel_ai_refinement, width=12)
+        self.ai_cancel_button.grid(row=0, column=2)
+        self._set_ai_controls_enabled(False)
+        self._toggle_ai_context()
+
+    def _toggle_ai_context(self) -> None:
+        needs_ai = self.ai_include_refined.get() or self.ai_include_summary.get()
+        if needs_ai:
+            self.ai_context_frame.grid()
+        else:
+            self.ai_context_frame.grid_remove()
+
+    def _set_ai_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button in getattr(self, "ai_choice_buttons", []):
+            button.configure(state=state)
+        self.ai_background_input.configure(state=state)
+        for child in self.ai_speaker_guide_frame.winfo_children():
+            if isinstance(child, tk.Entry):
+                child.configure(state=state)
+        self.ai_run_button.configure(state=state, cursor="hand2" if enabled else "arrow")
+        self.ai_cancel_button.configure(state="disabled", cursor="arrow")
+
+    def _rebuild_ai_speaker_guides(self, result: "AnalysisResult") -> None:
+        for child in self.ai_speaker_guide_frame.winfo_children():
+            child.destroy()
+        self.ai_speaker_guides.clear()
+        speakers = list(dict.fromkeys([*result.speakers, *(utterance.speaker for utterance in result.utterances)]))
+        if not speakers:
+            tk.Label(
+                self.ai_speaker_guide_frame,
+                text="화자 구간이 없어서 화자 안내를 추가할 수 없습니다.",
+                bg="#F7FBF9",
+                fg=self.MUTED,
+                font=("Segoe UI", 8),
+            ).grid(row=0, column=0, sticky="w")
+            return
+        tk.Label(
+            self.ai_speaker_guide_frame,
+            text="화자 안내 (선택)",
+            bg="#F7FBF9",
+            fg=self.INK,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        for index, speaker in enumerate(speakers, start=1):
+            variable = tk.StringVar()
+            self.ai_speaker_guides[speaker] = variable
+            tk.Label(
+                self.ai_speaker_guide_frame,
+                text=speaker,
+                bg="#F7FBF9",
+                fg=self.MUTED,
+                font=("Segoe UI", 8, "bold"),
+                width=10,
+                anchor="w",
+            ).grid(row=index, column=0, sticky="w", padx=(0, 8), pady=2)
+            tk.Entry(
+                self.ai_speaker_guide_frame,
+                textvariable=variable,
+                bg=self.PAPER,
+                fg=self.INK,
+                insertbackground=self.TEAL_DARK,
+                insertwidth=2,
+                relief="solid",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground="#B8CCC7",
+                highlightcolor=self.TEAL,
+                font=("Segoe UI", 9),
+            ).grid(row=index, column=1, sticky="ew", pady=2)
+
+    def _reset_ai_refinement(self) -> None:
+        self.ai_refinement_result = None
+        self.ai_refinement_running = False
+        self.ai_include_original.set(True)
+        self.ai_include_refined.set(False)
+        self.ai_include_summary.set(False)
+        self.ai_background_input.configure(state="normal")
+        self.ai_background_input.delete("1.0", "end")
+        self.ai_status_text.set("분석이 끝나면 AI로 만들 결과를 선택할 수 있습니다.")
+        self._rebuild_ai_speaker_guides_placeholder()
+        self._set_ai_controls_enabled(False)
+        self._toggle_ai_context()
+
+    def _rebuild_ai_speaker_guides_placeholder(self) -> None:
+        for child in self.ai_speaker_guide_frame.winfo_children():
+            child.destroy()
+        self.ai_speaker_guides.clear()
+
+    def start_ai_refinement(self) -> None:
+        if not self.current_result or not self.analysis_ready:
+            messagebox.showinfo(WINDOW_TITLE, "음성 분석이 끝난 뒤 AI로 결과를 만들 수 있습니다.")
+            return
+        selection = ResultSelection(
+            original=self.ai_include_original.get(),
+            refined=self.ai_include_refined.get(),
+            summary=self.ai_include_summary.get(),
+        )
+        if not (selection.original or selection.refined or selection.summary):
+            messagebox.showwarning(WINDOW_TITLE, "결과로 받을 항목을 하나 이상 선택해 주세요.")
+            return
+        if selection.needs_ai and not self.llm_connection_manager.snapshot().connected:
+            messagebox.showwarning(
+                WINDOW_TITLE,
+                "다듬은 대화 또는 요약을 만들려면 로컬 AI 연결을 먼저 확인해야 합니다.",
+            )
+            self.open_llm_connection_manager()
+            return
+        request = AIRefinementRequest(
+            selection=selection,
+            background=self.ai_background_input.get("1.0", "end-1c"),
+            speaker_guides=tuple(
+                SpeakerGuide(speaker=speaker, guidance=variable.get())
+                for speaker, variable in self.ai_speaker_guides.items()
+            ),
+        )
+        try:
+            self.ai_refinement_manager.start(self.current_result, request)
+        except AIRefinementBusyError as error:
+            messagebox.showwarning(WINDOW_TITLE, str(error))
+            return
+        self.ai_refinement_running = True
+        self.ai_refinement_result = None
+        self.ai_status_text.set("AI 정리 작업을 시작하고 있습니다…")
+        self._set_ai_controls_enabled(False)
+        self.ai_cancel_button.configure(state="normal", cursor="hand2")
+        self.start_button.configure(state="disabled", cursor="arrow")
+        self.choose_button.configure(state="disabled", cursor="arrow")
+        self.clear_button.configure(state="disabled", cursor="arrow")
+        self.whisper_selector.configure(state="disabled")
+        self.after(100, self._poll_ai_refinement)
+
+    def cancel_ai_refinement(self) -> None:
+        if not self.ai_refinement_running:
+            return
+        self.ai_refinement_manager.cancel()
+        self.ai_cancel_button.configure(state="disabled", cursor="arrow")
+        self.ai_status_text.set("AI 정리 중단 요청을 처리하고 있습니다…")
+
+    def _poll_ai_refinement(self) -> None:
+        state = self.ai_refinement_manager.snapshot()
+        self.ai_status_text.set(state.message)
+        if state.active:
+            self.after(100, self._poll_ai_refinement)
+            return
+        if not self.ai_refinement_running:
+            return
+        self.ai_refinement_running = False
+        self._set_ai_controls_enabled(self.current_result is not None and self.analysis_ready)
+        self.start_button.configure(state="normal", cursor="hand2")
+        self.choose_button.configure(state="normal", cursor="hand2")
+        self.clear_button.configure(state="normal", cursor="hand2")
+        self.whisper_selector.configure(state="readonly")
+        if state.state == "completed" and state.result and self.current_result:
+            self.ai_refinement_result = state.result
+            self.ai_status_text.set("AI 정리 결과를 만들었습니다. 원본 전사는 변경되지 않았습니다.")
+            self._show_ai_refinement_result(self.current_result, state.result)
+        elif self.current_result:
+            self._show_analysis_result(self.current_result)
+            if state.state == "failed":
+                self.ai_status_text.set(f"AI 정리를 완료하지 못했습니다. {state.message}")
+            else:
+                self.ai_status_text.set("AI 정리를 중단했습니다. 원본 전사문은 그대로 유지됩니다.")
+
+    def _show_ai_refinement_result(self, analysis: "AnalysisResult", result: AIRefinementResult) -> None:
+        sections: list[tuple[str, str]] = []
+        if result.selection.original:
+            sections.append(("원본 전사 메시지", render_original_conversation(analysis)))
+        if result.selection.refined:
+            sections.append(("다듬은 대화", render_refined_conversation(analysis, result)))
+        if result.selection.summary and result.summary:
+            sections.append(("요약", render_summary(result.summary)))
+        lines = [f"{analysis.source_name} · AI 정리 완료", ""]
+        for title, body in sections:
+            lines.extend([f"[{title}]", body, ""])
+        if result.warnings:
+            lines.extend(["[AI 처리 참고]", *(f"- {warning}" for warning in result.warnings), ""])
+        self._set_transcript("\n".join(lines).rstrip())
+
     def choose_file(self) -> None:
         selected = filedialog.askopenfilename(title="음성 파일 선택", filetypes=SUPPORTED_FILE_TYPES)
         if not selected:
@@ -1354,6 +1641,7 @@ class TalkTrackerApp(tk.Tk):
         self.file_detail.set(detail)
         self.analysis_ready = False
         self.current_result = None
+        self._reset_ai_refinement()
         self.preview_speaker_segments = []
         self.preview_duration = 0.0
         self.progress_value.set(0)
@@ -1365,6 +1653,7 @@ class TalkTrackerApp(tk.Tk):
         self.audio_path = None
         self.analysis_ready = False
         self.current_result = None
+        self._reset_ai_refinement()
         self.preview_speaker_segments = []
         self.preview_duration = 0.0
         self.progress_value.set(0)
@@ -1379,6 +1668,9 @@ class TalkTrackerApp(tk.Tk):
         self._draw_timeline(empty=True)
 
     def start_analysis(self) -> None:
+        if self.ai_refinement_running:
+            messagebox.showinfo(WINDOW_TITLE, "AI 정리가 끝나거나 중단된 뒤 새 분석을 시작할 수 있습니다.")
+            return
         if not self.audio_path:
             messagebox.showinfo(WINDOW_TITLE, "먼저 확인할 음성 파일을 선택해 주세요.")
             return
@@ -1401,6 +1693,7 @@ class TalkTrackerApp(tk.Tk):
         self.analysis_ready = False
         self.analysis_running = True
         self.current_result = None
+        self._reset_ai_refinement()
         self.preview_speaker_segments = []
         self.preview_duration = 0.0
         self.analysis_events = Queue()
@@ -1484,6 +1777,9 @@ class TalkTrackerApp(tk.Tk):
         self.whisper_selector.configure(state="readonly")
         self._draw_timeline(empty=False)
         self._show_analysis_result(result)
+        self._rebuild_ai_speaker_guides(result)
+        self._set_ai_controls_enabled(True)
+        self.ai_status_text.set("원본 전사 메시지를 저장하거나, AI로 만들 결과를 선택할 수 있습니다.")
 
     def _analysis_failed(self, error: Exception) -> None:
         elapsed = self._elapsed_seconds()
@@ -1527,6 +1823,10 @@ class TalkTrackerApp(tk.Tk):
         self.whisper_selector.configure(state="readonly")
         self._draw_timeline(empty=not bool(result.speaker_segments))
         self._show_analysis_result(result)
+        self._rebuild_ai_speaker_guides(result)
+        self._set_ai_controls_enabled(self.analysis_ready)
+        if self.analysis_ready:
+            self.ai_status_text.set("중단 시점까지의 전사문으로 AI 결과를 만들 수 있습니다.")
 
     def _draw_timeline(self, *, empty: bool) -> None:
         canvas = self.timeline_canvas
@@ -1628,7 +1928,11 @@ class TalkTrackerApp(tk.Tk):
         if not self.current_result:
             messagebox.showerror(WINDOW_TITLE, "저장할 분석 결과를 찾지 못했습니다.")
             return
-        content = self.current_result.to_markdown()
+        content = (
+            render_selected_markdown(self.current_result, self.ai_refinement_result)
+            if self.ai_refinement_result
+            else self.current_result.to_markdown()
+        )
         try:
             Path(target).write_text(content, encoding="utf-8")
         except OSError as error:

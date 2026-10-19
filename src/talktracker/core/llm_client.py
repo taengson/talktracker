@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Event, Thread
+from time import sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -31,6 +34,10 @@ class LocalLLMHTTPError(LocalLLMError):
     def __init__(self, status_code: int, message: str) -> None:
         self.status_code = status_code
         super().__init__(message or f"로컬 AI 서버가 HTTP {status_code} 오류를 반환했습니다.")
+
+
+class LocalLLMCancelled(LocalLLMError):
+    """Raised when a caller no longer wants the current completion result."""
 
 
 @dataclass(frozen=True)
@@ -155,6 +162,111 @@ class OpenAICompatibleLocalClient:
         # A structurally valid completion is still proof that the selected model ran.
         return LocalLLMConnectionTest(model=model, response_preview=content[:160])
 
+    def create_chat_completion(
+        self,
+        model: str,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float = 0,
+        max_tokens: int = 1_024,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> str:
+        """Return a streamed text completion and close it when cancelled.
+
+        OpenAI-compatible servers generally stream Server-Sent Events.  A
+        small watcher closes the response socket when cancellation is requested
+        so the caller need not wait for a long local generation to finish.
+        A normal JSON response remains accepted for small compatibility
+        servers that ignore the ``stream`` flag.
+        """
+
+        if should_cancel and should_cancel():
+            raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.")
+        model = model.strip()
+        if not model:
+            raise LocalLLMError("AI 정리에 사용할 모델을 선택해 주세요.")
+        if not messages:
+            raise LocalLLMError("AI 정리에 보낼 대화 내용을 찾지 못했습니다.")
+        body = {
+            "model": model,
+            "messages": messages,
+            "temperature": max(0, min(2, float(temperature))),
+            "max_tokens": max(1, int(max_tokens)),
+            "stream": True,
+        }
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        http_request = Request(self.connection.endpoint("chat/completions"), data=data, method="POST")
+        http_request.add_header("Accept", "text/event-stream, application/json")
+        http_request.add_header("Content-Type", "application/json")
+        if self.connection.api_key:
+            http_request.add_header("Authorization", f"Bearer {self.connection.api_key}")
+
+        try:
+            response = urlopen(http_request, timeout=max(self.timeout_seconds, 180.0))
+        except HTTPError as error:
+            raise LocalLLMHTTPError(error.code, _server_error_message(error)) from error
+        except (URLError, socket.timeout, TimeoutError, OSError) as error:
+            raise LocalLLMError("로컬 AI 서버에 연결할 수 없습니다. 서버 주소와 실행 상태를 확인해 주세요.") from error
+
+        done = Event()
+
+        def close_on_cancel() -> None:
+            while not done.is_set():
+                if should_cancel and should_cancel():
+                    response.close()
+                    return
+                sleep(0.05)
+
+        watcher = Thread(target=close_on_cancel, name="talktracker-llm-cancel", daemon=True)
+        watcher.start()
+        chunks: list[str] = []
+        fallback_lines: list[bytes] = []
+        try:
+            while True:
+                if should_cancel and should_cancel():
+                    raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.")
+                try:
+                    raw_line = response.readline()
+                except (OSError, ValueError, socket.timeout) as error:
+                    if should_cancel and should_cancel():
+                        raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.") from error
+                    raise LocalLLMError("로컬 AI 서버의 생성 응답을 읽지 못했습니다.") from error
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    fallback_lines.append(raw_line)
+                    continue
+                data_line = line[5:].strip()
+                if data_line == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                chunks.extend(_stream_content(event))
+        finally:
+            done.set()
+            response.close()
+
+        if should_cancel and should_cancel():
+            raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.")
+        content = "".join(chunks).strip()
+        if not content and fallback_lines:
+            try:
+                fallback = json.loads(b"".join(fallback_lines).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise LocalLLMResponseError("AI 정리 응답을 읽을 수 없습니다.") from error
+            if isinstance(fallback, dict):
+                content = _completion_content(fallback)
+        if not content:
+            raise LocalLLMResponseError("AI 정리 응답에 읽을 수 있는 내용이 없습니다.")
+        return content
+
     def _request_json(
         self,
         method: str,
@@ -203,3 +315,33 @@ def _server_error_message(error: HTTPError) -> str:
     if error.code >= 500:
         return f"로컬 AI 서버 내부 오류가 발생했습니다 (HTTP {error.code}). 서버 실행 상태를 확인해 주세요."
     return f"로컬 AI 서버가 HTTP {error.code} 오류를 반환했습니다."
+
+
+def _stream_content(payload: dict[str, Any]) -> list[str]:
+    """Read text deltas from the common OpenAI-compatible SSE shape."""
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return []
+    parts: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+    return parts
+
+
+def _completion_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    return content.strip() if isinstance(content, str) else ""

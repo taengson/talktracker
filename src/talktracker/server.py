@@ -24,8 +24,17 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 from .core.jobs import JobManager, JobNotFoundError, JobStateError
+from .core.refinement import (
+    AIRefinementRequest,
+    RefinementError,
+    ResultSelection,
+    SpeakerGuide,
+    render_original_conversation,
+    render_refined_conversation,
+    render_summary,
+)
 from .core.llm_client import LocalLLMError
-from .core.workflow import LocalLLMConnectionManager
+from .core.workflow import AIRefinementBusyError, AIRefinementManager, AIRefinementState, LocalLLMConnectionManager
 from .core.models import (
     WHISPER_PROFILES,
     WhisperProfile,
@@ -61,6 +70,71 @@ async def _read_local_llm_request(request: Request, *, require_model: bool) -> t
     if require_model and not model.strip():
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="연결을 확인할 모델 ID를 입력하거나 선택해 주세요.")
     return base_url, api_key, model
+
+
+async def _read_refinement_request(request: Request) -> AIRefinementRequest:
+    """Read result choices and transient context without accepting arbitrary data."""
+
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="AI 정리 입력 형식이 올바르지 않습니다.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="AI 정리 입력 형식이 올바르지 않습니다.")
+    selection_raw = payload.get("selection", {})
+    if not isinstance(selection_raw, dict):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="결과 선택 형식이 올바르지 않습니다.")
+    values = {name: selection_raw.get(name, default) for name, default in (("original", True), ("refined", False), ("summary", False))}
+    if not all(isinstance(value, bool) for value in values.values()):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="결과 선택 형식이 올바르지 않습니다.")
+    background = payload.get("background", "")
+    guides_raw = payload.get("speaker_guides", [])
+    if not isinstance(background, str) or len(background) > 20_000 or not isinstance(guides_raw, list) or len(guides_raw) > 100:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="AI 정리 입력 길이 또는 형식이 올바르지 않습니다.")
+    guides: list[SpeakerGuide] = []
+    for item in guides_raw:
+        if not isinstance(item, dict) or not isinstance(item.get("speaker"), str) or not isinstance(item.get("guidance"), str):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 안내 입력 형식이 올바르지 않습니다.")
+        if len(item["speaker"]) > 200 or len(item["guidance"]) > 2_000:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="화자 안내 입력 길이가 너무 깁니다.")
+        guides.append(SpeakerGuide(speaker=item["speaker"], guidance=item["guidance"]))
+    try:
+        return AIRefinementRequest(
+            selection=ResultSelection(**values),
+            background=background,
+            speaker_guides=tuple(guides),
+        ).normalized()
+    except RefinementError as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
+
+
+def _refinement_payload(analysis: Any, state: AIRefinementState) -> dict[str, Any]:
+    """Serialize only requested result sections; guides and API keys never leave memory."""
+
+    payload: dict[str, Any] = {
+        "state": state.state,
+        "message": state.message,
+        "active": state.active,
+        "error": state.error,
+        "owner_id": state.owner_id,
+        "result": None,
+    }
+    if not state.result:
+        return payload
+    result = state.result
+    sections: dict[str, str] = {}
+    if result.selection.original:
+        sections["original"] = render_original_conversation(analysis)
+    if result.selection.refined:
+        sections["refined"] = render_refined_conversation(analysis, result)
+    if result.selection.summary and result.summary:
+        sections["summary"] = render_summary(result.summary)
+    payload["result"] = {
+        "sections": sections,
+        "warnings": list(result.warnings),
+        "prompt_version": result.prompt_version,
+    }
+    return payload
 
 
 def _integer_setting(name: str, default: int, *, minimum: int) -> int:
@@ -198,7 +272,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     h1 { margin:0; font-size:29px; } header p { margin:6px 0 0; color:#cde5df; } main { padding:26px 0 48px; }
     section { margin-bottom:16px; padding:22px; border:1px solid var(--line); border-radius:12px; background:#fff; box-shadow:0 4px 14px rgb(16 54 64 / 5%); }
     h2 { margin:0 0 14px; font-size:19px; } label { display:block; margin:12px 0 5px; font-weight:650; }
-    input, select, button { min-height:38px; border:1px solid #aac4bf; border-radius:7px; font:inherit; } input, select { width:100%; padding:7px 9px; background:#fff; }
+    input, select, textarea, button { min-height:38px; border:1px solid #aac4bf; border-radius:7px; font:inherit; } input, select, textarea { width:100%; padding:7px 9px; background:#fff; } textarea { min-height:86px; resize:vertical; }
     button { padding:7px 15px; cursor:pointer; color:#fff; border-color:var(--teal); background:var(--teal); font-weight:700; }
     button.secondary { color:var(--ink); background:#fff; border-color:#a9bbb7; } button.danger { color:#fff; background:var(--danger); border-color:var(--danger); }
     button:disabled { opacity:.55; cursor:wait; } .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .actions { display:flex; gap:9px; align-items:center; margin-top:17px; }
@@ -206,7 +280,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; }
     dl { display:grid; grid-template-columns:126px 1fr; gap:6px 14px; margin:16px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
     .timeline { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f9fbfa; overflow-x:auto; } .timeline-title { margin:0 0 9px; font-size:13px; font-weight:750; } .timeline-scale { display:flex; justify-content:space-between; margin:0 3px 5px 88px; color:var(--muted); font-size:11px; } .speaker-lane { display:grid; grid-template-columns:76px minmax(420px, 1fr); gap:10px; align-items:center; min-width:560px; margin:5px 0; } .speaker-label { overflow:hidden; color:var(--muted); font-size:12px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .speaker-track { position:relative; height:14px; border-radius:4px; background:repeating-linear-gradient(90deg,#e8efed 0,#e8efed calc(10% - 1px),#dfe9e6 calc(10% - 1px),#dfe9e6 10%); } .speaker-turn { position:absolute; top:2px; height:10px; min-width:2px; border-radius:3px; box-shadow:0 1px 1px rgb(16 54 64 / 18%); } .timeline-empty { color:var(--muted); font-size:13px; }
-    a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; }
+    a { color:#096a71; font-weight:700; } .job { padding:10px 0; border-top:1px solid var(--line); } .job:first-child { border-top:0; } .choices { display:flex; flex-wrap:wrap; gap:14px; margin:8px 0; } .choices label { display:flex; align-items:center; gap:6px; margin:0; font-weight:650; } .choices input { width:auto; min-height:auto; } .speaker-guide { margin:8px 0; } .result-section { margin-top:14px; } .result-section h3 { margin:0 0 7px; font-size:15px; } pre.output { margin:0; padding:13px; overflow:auto; white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; background:#f9fbfa; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; }
     @media (max-width:620px) { .grid { grid-template-columns:1fr; } dl { grid-template-columns:1fr; gap:1px; } dt { margin-top:8px; } .timeline { padding:11px; } }
   </style>
 </head>
@@ -229,10 +303,28 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     <h2>현재 작업</h2><div id="current-notice" class="notice"></div><div class="progress" aria-label="분석 진행률"><div id="progress-bar"></div></div>
     <dl id="details"></dl><div id="timeline" class="timeline"></div><div class="actions"><button id="cancel" class="danger" type="button">중단</button><a id="result" class="hidden" download>Markdown 결과 다운로드</a></div>
   </section>
+  <section id="ai-refinement" class="hidden">
+    <h2>AI로 결과 정리</h2>
+    <p class="hint">원본 전사는 바뀌지 않습니다. 다듬은 대화와 요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 아래 안내 입력이 전달됩니다.</p>
+    <div class="choices" role="group" aria-label="받을 결과 선택">
+      <label><input id="ai-original" type="checkbox" checked> 원본 전사 메시지</label>
+      <label><input id="ai-refined" type="checkbox"> 다듬은 대화</label>
+      <label><input id="ai-summary" type="checkbox"> 요약</label>
+    </div>
+    <div id="ai-context" class="hidden">
+      <label for="ai-background">대화의 목적·배경 안내 (선택)</label>
+      <textarea id="ai-background" maxlength="20000" placeholder="회의 목적, 참여자 역할, 프로젝트명, 약어·고유명사를 자세히 적으면 전사 보정과 요약이 더 정확해집니다. 입력한 내용도 로컬 AI 서버에만 전달됩니다."></textarea>
+      <p class="hint">화자 안내는 AI가 문맥을 이해하는 보조 정보이며 결과 문서에는 자동으로 표시하지 않습니다.</p>
+      <div id="ai-speaker-guides"></div>
+    </div>
+    <div class="actions"><button id="ai-run" type="button">선택한 결과 만들기</button><button id="ai-cancel" class="danger hidden" type="button">AI 정리 중단</button></div>
+    <p id="ai-status" class="notice">분석이 끝나면 결과를 선택할 수 있습니다.</p>
+    <div id="ai-results"></div>
+  </section>
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null, profiles = [];
+  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [];
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token")?.value.trim() || "";
@@ -252,7 +344,68 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     renderTimeline(job.speaker_segments || [], job.duration_seconds);
     const terminal = ["completed","cancelled","failed"].includes(job.state); $("cancel").disabled = terminal || job.cancel_requested;
     const result = $("result"); result.classList.toggle("hidden", !job.result_available); result.href = apiUrl(`/api/jobs/${job.id}/result.md`, true);
+    const refinement = $("ai-refinement");
+    const canRefine = Boolean($("local-ai")) && job.result_available;
+    refinement.classList.toggle("hidden", !canRefine);
+    if (canRefine) { prepareAiControls(job); if (terminal) loadAiRefinement(job.id); }
     if (terminal) stopWatching(); loadJobs();
+  }
+  function updateAiContext() {
+    const needsAi = $("ai-refined").checked || $("ai-summary").checked;
+    $("ai-context").classList.toggle("hidden", !needsAi);
+  }
+  function prepareAiControls(job) {
+    const panel = $("ai-refinement");
+    if (panel.dataset.jobId === job.id) return;
+    panel.dataset.jobId = job.id;
+    $("ai-results").innerHTML = "";
+    $("ai-status").textContent = "받을 결과를 고른 뒤 ‘선택한 결과 만들기’를 누르세요.";
+    const speakers = [...new Set((job.speaker_segments || []).map((segment) => String(segment.speaker)).filter(Boolean))];
+    $("ai-speaker-guides").innerHTML = speakers.map((speaker, index) => `<div class="speaker-guide"><label for="ai-speaker-${index}">${escapeHtml(speaker)} 안내 (선택)</label><input id="ai-speaker-${index}" data-speaker="${escapeHtml(speaker)}" type="text" maxlength="2000" placeholder="예: 프로젝트 매니저 · 개발 담당"></div>`).join("");
+    updateAiContext();
+  }
+  function renderAiRefinement(data) {
+    const status = $("ai-status"), running = Boolean(data.active);
+    status.textContent = data.error || data.message;
+    status.classList.toggle("error", data.state === "failed");
+    $("ai-run").disabled = running;
+    $("ai-cancel").classList.toggle("hidden", !running);
+    $("ai-cancel").disabled = !running;
+    const result = data.result;
+    if (!result) return;
+    const labels = {original:"원본 전사 메시지", refined:"다듬은 대화", summary:"요약"};
+    const sections = Object.entries(result.sections || {}).map(([key, value]) => `<div class="result-section"><h3>${escapeHtml(labels[key] || key)}</h3><pre class="output">${escapeHtml(value)}</pre></div>`).join("");
+    const warnings = (result.warnings || []).map((warning) => `<p class="notice error">${escapeHtml(warning)}</p>`).join("");
+    $("ai-results").innerHTML = `${warnings}${sections}`;
+  }
+  function stopRefinementWatching() { if (refinementPolling) { clearInterval(refinementPolling); refinementPolling = null; } }
+  async function loadAiRefinement(id = activeId) {
+    if (!id || !$("ai-refinement").dataset.jobId || $("ai-refinement").dataset.jobId !== id) return;
+    try {
+      const data = await request(`/api/jobs/${id}/ai-refinement`);
+      renderAiRefinement(data);
+      if (data.active && !refinementPolling) refinementPolling = setInterval(() => loadAiRefinement(id), 700);
+      if (!data.active) stopRefinementWatching();
+    } catch (error) { $("ai-status").textContent = error.message; $("ai-status").classList.add("error"); stopRefinementWatching(); }
+  }
+  function aiInput() {
+    const selection = {original:$("ai-original").checked, refined:$("ai-refined").checked, summary:$("ai-summary").checked};
+    if (!selection.original && !selection.refined && !selection.summary) throw new Error("결과로 받을 항목을 하나 이상 선택해 주세요.");
+    const speaker_guides = [...$("ai-speaker-guides").querySelectorAll("input[data-speaker]")].map((input) => ({speaker:input.dataset.speaker, guidance:input.value}));
+    return {selection, background:$("ai-background").value, speaker_guides};
+  }
+  async function startAiRefinement() {
+    if (!activeId) return;
+    let input;
+    try { input = aiInput(); } catch (error) { $("ai-status").textContent = error.message; $("ai-status").classList.add("error"); return; }
+    $("ai-run").disabled = true; $("ai-status").textContent = "AI 정리 작업을 시작하고 있습니다…"; $("ai-status").classList.remove("error");
+    try { renderAiRefinement(await request(`/api/jobs/${activeId}/ai-refinement`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)})); loadAiRefinement(activeId); }
+    catch (error) { $("ai-status").textContent = error.message; $("ai-status").classList.add("error"); $("ai-run").disabled = false; }
+  }
+  async function cancelAiRefinement() {
+    if (!activeId) return;
+    try { renderAiRefinement(await request(`/api/jobs/${activeId}/ai-refinement/cancel`, {method:"POST"})); loadAiRefinement(activeId); }
+    catch (error) { $("ai-status").textContent = error.message; $("ai-status").classList.add("error"); }
   }
   const SPEAKER_COLORS = ["#58aa9b", "#e8a05a", "#877bd7", "#62a9c4", "#d37f98", "#91ad58", "#aa87c9", "#be9364"];
   function renderTimeline(segments, durationSeconds) {
@@ -306,7 +459,7 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
     if (includeModel) { input.model = $("llm-model").value.trim(); if (!input.model) throw new Error("연결을 확인할 모델을 선택하거나 직접 입력해 주세요."); }
     return input;
   }
-  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; }
+  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); }
   async function loadLlmConnection() {
     try {
       const connection = await request("/api/local-llm");
@@ -357,6 +510,9 @@ def _index_page(*, access_token_required: bool = False, local_llm_available: boo
   $("profile").addEventListener("change", updateProfileState);
   $("llm-load-models")?.addEventListener("click", loadLlmModels);
   $("llm-verify")?.addEventListener("click", verifyLlmConnection);
+  ["ai-original","ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
+  $("ai-run").addEventListener("click", startAiRefinement);
+  $("ai-cancel").addEventListener("click", cancelAiRefinement);
   $("token")?.addEventListener("change", refreshProtectedData);
   $("upload-form").addEventListener("submit", async (event) => { event.preventDefault(); const selected = profiles.find((profile) => profile.key === $("profile").value); if (!selected || !selected.available) { updateProfileState(); return; } const form = new FormData(event.currentTarget); const button = $("submit"); button.disabled = true; $("upload-status").textContent = "파일을 서버로 보내고 있습니다…"; try { const job = (await request("/api/jobs", {method:"POST", body:form})).job; render(job); watch(job.id); loadJobs(); $("upload-status").textContent = "분석 대기열에 추가했습니다."; } catch (error) { $("upload-status").textContent = error.message; } finally { updateProfileState(); } });
   $("cancel").addEventListener("click", async () => { if (!activeId) return; try { render((await request(`/api/jobs/${activeId}/cancel`, {method:"POST"})).job); } catch (error) { $("current-notice").textContent = error.message; $("current-notice").classList.add("error"); } });
@@ -389,6 +545,7 @@ def create_app(
     retention_days: int = DEFAULT_RETENTION_DAYS,
     manager: JobManager | None = None,
     llm_connection_manager: LocalLLMConnectionManager | None = None,
+    ai_refinement_manager: AIRefinementManager | None = None,
     local_llm_enabled: bool = True,
 ) -> FastAPI:
     """Create a server application without importing the Tkinter GUI."""
@@ -400,6 +557,10 @@ def create_app(
     token = (access_token or "").strip() or None
     job_manager = manager or JobManager(project_root)
     local_llm_manager = llm_connection_manager or LocalLLMConnectionManager()
+    refinement_manager = ai_refinement_manager or AIRefinementManager(
+        local_llm_manager,
+        execution_lock=job_manager.execution_lock,
+    )
     job_manager.cleanup_expired(retention_days)
 
     @asynccontextmanager
@@ -410,6 +571,7 @@ def create_app(
     app = FastAPI(title="TalkTracker Server", version="0.1.0", lifespan=lifespan)
     app.state.job_manager = job_manager
     app.state.local_llm_manager = local_llm_manager
+    app.state.ai_refinement_manager = refinement_manager
     app.state.local_llm_enabled = local_llm_enabled
     app.state.access_token_required = bool(token)
     app.state.max_upload_bytes = max_upload_mb * 1024 * 1024
@@ -505,6 +667,59 @@ def create_app(
             "recent_base_urls": list(connection.settings.recent_base_urls),
             "response_preview": result.response_preview,
         }
+
+    @app.get("/api/jobs/{job_id}/ai-refinement")
+    def ai_refinement_status(job_id: str, _: None = Depends(require_access)) -> dict[str, Any]:
+        try:
+            analysis = job_manager.analysis_result(job_id)
+        except JobNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
+        except JobStateError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        state = refinement_manager.snapshot()
+        if state.owner_id not in {None, job_id}:
+            return {
+                "state": "idle",
+                "message": "다른 분석 결과의 AI 정리 작업이 진행 중입니다.",
+                "active": False,
+                "error": None,
+                "owner_id": state.owner_id,
+                "result": None,
+            }
+        return _refinement_payload(analysis, state)
+
+    @app.post("/api/jobs/{job_id}/ai-refinement")
+    async def start_ai_refinement(job_id: str, request: Request, _: None = Depends(require_access)) -> dict[str, Any]:
+        try:
+            analysis = job_manager.analysis_result(job_id)
+        except JobNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
+        except JobStateError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        refinement_request = await _read_refinement_request(request)
+        if refinement_request.selection.needs_ai and not local_llm_manager.snapshot().connected:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="로컬 AI 연결을 확인한 뒤 다듬은 대화 또는 요약을 만들 수 있습니다.",
+            )
+        try:
+            state = refinement_manager.start(analysis, refinement_request, owner_id=job_id)
+        except AIRefinementBusyError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        return _refinement_payload(analysis, state)
+
+    @app.post("/api/jobs/{job_id}/ai-refinement/cancel")
+    def cancel_ai_refinement(job_id: str, _: None = Depends(require_access)) -> dict[str, Any]:
+        try:
+            analysis = job_manager.analysis_result(job_id)
+        except JobNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="작업을 찾지 못했습니다.") from error
+        except JobStateError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        state = refinement_manager.snapshot()
+        if state.owner_id != job_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이 분석 결과에는 진행 중인 AI 정리 작업이 없습니다.")
+        return _refinement_payload(analysis, refinement_manager.cancel())
 
     @app.get("/api/jobs")
     def jobs(_: None = Depends(require_access)) -> dict[str, Any]:

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from threading import Event, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Any, Protocol
 
 from .models import get_whisper_profile
@@ -81,6 +81,7 @@ class AnalysisJob:
     cancel_requested: bool = False
     revision: int = 0
     cancel_event: Event = field(default_factory=Event, repr=False)
+    analysis_result: Any | None = field(default=None, repr=False)
 
 
 class JobManager:
@@ -97,6 +98,7 @@ class JobManager:
         *,
         engine_factory: EngineFactory | None = None,
         jobs_root: Path | None = None,
+        execution_lock: Lock | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.jobs_root = (jobs_root or self.project_root / "outputs" / "jobs").resolve()
@@ -106,6 +108,9 @@ class JobManager:
         self._queue_order: list[str] = []
         self._queue: Queue[str | None] = Queue()
         self._lock = RLock()
+        # AI refinement shares this lock with audio analysis.  One local model
+        # workload at a time keeps CPU/GPU pressure predictable.
+        self.execution_lock = execution_lock or Lock()
         self._closed = False
         self._worker = Thread(target=self._worker_loop, name="talktracker-analysis-worker", daemon=True)
         self._worker.start()
@@ -203,6 +208,15 @@ class JobManager:
                 raise JobStateError("아직 내려받을 결과가 없습니다.")
             return job.result_path
 
+    def analysis_result(self, job_id: str) -> Any:
+        """Return the in-memory transcription result for the current app run."""
+
+        with self._lock:
+            job = self._require_job_locked(job_id)
+            if job.analysis_result is None:
+                raise JobStateError("AI 정리에 사용할 전사 결과가 없습니다. 분석을 먼저 완료해 주세요.")
+            return job.analysis_result
+
     def delete(self, job_id: str) -> None:
         """Remove a completed, cancelled, or failed job and all of its files."""
 
@@ -274,15 +288,16 @@ class JobManager:
             self._persist_locked(job)
 
         try:
-            engine = self._engine_factory(self.project_root, job.whisper_profile)
-            result = engine.analyze(
-                job.source_path,
-                progress=lambda value, message: self._record_progress(job_id, value, message),
-                on_diarization=lambda segments, duration: self._record_diarization(job_id, segments, duration),
-                should_cancel=job.cancel_event.is_set,
-            )
-            result_path = job.directory / "result.md"
-            result_path.write_text(result.to_markdown(), encoding="utf-8")
+            with self.execution_lock:
+                engine = self._engine_factory(self.project_root, job.whisper_profile)
+                result = engine.analyze(
+                    job.source_path,
+                    progress=lambda value, message: self._record_progress(job_id, value, message),
+                    on_diarization=lambda segments, duration: self._record_diarization(job_id, segments, duration),
+                    should_cancel=job.cancel_event.is_set,
+                )
+                result_path = job.directory / "result.md"
+                result_path.write_text(result.to_markdown(), encoding="utf-8")
         except Exception as error:
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -297,6 +312,7 @@ class JobManager:
             job = self._jobs.get(job_id)
             if not job:
                 return
+            job.analysis_result = result
             job.result_path = result_path
             job.is_partial = bool(getattr(result, "is_partial", False))
             if job.is_partial or job.cancel_event.is_set():

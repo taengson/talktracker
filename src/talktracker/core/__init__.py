@@ -5,6 +5,7 @@ from .jobs import JobManager, JobNotFoundError, JobStateError
 from .llm_client import (
     LocalLLMConnection,
     LocalLLMConnectionTest,
+    LocalLLMCancelled,
     LocalLLMError,
     LocalLLMHTTPError,
     LocalLLMModel,
@@ -24,7 +25,20 @@ from .models import (
     get_whisper_profile,
     get_whisper_runtime,
 )
-from .workflow import LocalLLMConnectionManager, LocalLLMConnectionState
+from .refinement import (
+    AIRefinementRequest,
+    AIRefinementResult,
+    ConversationSummary,
+    RefinementCancelled,
+    RefinementError,
+    ResultSelection,
+    SpeakerGuide,
+    render_original_conversation,
+    render_refined_conversation,
+    render_selected_markdown,
+    render_summary,
+)
+from .workflow import AIRefinementBusyError, AIRefinementManager, AIRefinementState, LocalLLMConnectionManager, LocalLLMConnectionState
 
 __all__ = [
     "AnalysisEngine",
@@ -35,6 +49,7 @@ __all__ = [
     "JobStateError",
     "LocalLLMConnection",
     "LocalLLMConnectionTest",
+    "LocalLLMCancelled",
     "LocalLLMConnectionManager",
     "LocalLLMConnectionState",
     "LocalLLMError",
@@ -43,7 +58,17 @@ __all__ = [
     "LocalLLMResponseError",
     "LocalLLMSettings",
     "LocalLLMSettingsStore",
+    "AIRefinementBusyError",
+    "AIRefinementManager",
+    "AIRefinementRequest",
+    "AIRefinementResult",
+    "AIRefinementState",
+    "ConversationSummary",
     "OpenAICompatibleLocalClient",
+    "RefinementCancelled",
+    "RefinementError",
+    "ResultSelection",
+    "SpeakerGuide",
     "WHISPER_PROFILES",
     "CudaRuntimeStatus",
     "WhisperProfile",
@@ -54,4 +79,8 @@ __all__ = [
     "get_whisper_profile",
     "get_whisper_runtime",
     "normalize_local_server_url",
+    "render_original_conversation",
+    "render_refined_conversation",
+    "render_selected_markdown",
+    "render_summary",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+import json
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from talktracker.core.jobs import JobManager
+from talktracker.core.analysis import AnalysisResult, SpeakerSegment, Utterance
 from talktracker.core.llm_client import LocalLLMConnection, LocalLLMConnectionTest, LocalLLMModel
 from talktracker.core.llm_config import LocalLLMSettingsStore
 from talktracker.core.models import get_whisper_profile
@@ -43,6 +45,43 @@ class FakeLocalLLMClient:
 
     def test_connection(self, model: str) -> LocalLLMConnectionTest:
         return LocalLLMConnectionTest(model=model, response_preview="OK")
+
+    def create_chat_completion(self, model: str, *, messages, temperature: float, max_tokens: int, should_cancel=None) -> str:
+        if should_cancel and should_cancel():
+            from talktracker.core.llm_client import LocalLLMCancelled
+
+            raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.")
+        return json.dumps(
+            {
+                "segments": [
+                    {"segment_id": "s-0001", "refined_text": "다음 주까지 초안을 준비하겠습니다."},
+                    {"segment_id": "s-0002", "refined_text": "일정을 확인하겠습니다."},
+                ],
+                "summary": {
+                    "overview": "초안 준비 일정과 확인 작업을 논의했다.",
+                    "key_points": ["다음 주까지 초안을 준비한다."],
+                    "decisions": [],
+                    "action_items": ["일정을 확인한다."],
+                    "open_questions": [],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class RefinableFakeEngine:
+    def analyze(self, source: Path, *, progress, on_diarization, should_cancel):
+        progress(100, "완료")
+        on_diarization([SimpleNamespace(start=0.0, end=7.0, speaker="화자 1")], 7.0)
+        return AnalysisResult(
+            source_name=source.name,
+            duration=7.0,
+            speaker_segments=[SpeakerSegment(0.0, 7.0, "화자 1")],
+            utterances=[
+                Utterance(0.0, 3.0, "화자 1", "다음주 까지 초안 준비 할게요"),
+                Utterance(3.2, 7.0, "화자 1", "일정 확인 할게요"),
+            ],
+        )
 
 
 class JobManagerTests(unittest.TestCase):
@@ -174,6 +213,8 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('/api/local-llm/verify', page)
         self.assertIn('id="llm-api-key"', page)
         self.assertIn('id="llm-url-options"', page)
+        self.assertIn('id="ai-refinement"', page)
+        self.assertIn('/ai-refinement/cancel', page)
         self.assertIn('form.classList.add("hidden")', page)
         self.assertNotIn('id="token"', page)
         protected_page = _index_page(access_token_required=True)
@@ -231,6 +272,52 @@ class ServerPageTests(unittest.TestCase):
                 self.assertNotIn("temporary-secret", malformed.text)
 
             self.assertNotIn("temporary-secret", settings_path.read_text(encoding="utf-8"))
+
+    def test_web_ai_refinement_returns_only_selected_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = JobManager(root, engine_factory=lambda _root, _profile: RefinableFakeEngine())
+            settings_path = root / "settings" / "local-llm.json"
+            llm_manager = LocalLLMConnectionManager(
+                settings_store=LocalLLMSettingsStore(settings_path),
+                client_factory=FakeLocalLLMClient,
+            )
+            try:
+                job = manager.create_upload_job("meeting.m4a", "turbo")
+                job.source_path.write_bytes(b"recording")
+                manager.finish_upload(job.id, job.source_path.stat().st_size)
+                deadline = time.monotonic() + 3
+                while manager.snapshot(job.id)["state"] not in {"completed", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(manager.snapshot(job.id)["state"], "completed")
+                with TestClient(create_app(project_root=root, manager=manager, llm_connection_manager=llm_manager)) as client:
+                    verified = client.post(
+                        "/api/local-llm/verify",
+                        json={"base_url": "http://localhost:11434", "api_key": "temporary-secret", "model": "talktracker-test"},
+                    )
+                    self.assertEqual(verified.status_code, 200)
+                    started = client.post(
+                        f"/api/jobs/{job.id}/ai-refinement",
+                        json={
+                            "selection": {"original": False, "refined": True, "summary": True},
+                            "background": "프로젝트 회의",
+                            "speaker_guides": [{"speaker": "화자 1", "guidance": "프로젝트 매니저"}],
+                        },
+                    )
+                    self.assertEqual(started.status_code, 200)
+                    deadline = time.monotonic() + 3
+                    status_payload = started.json()
+                    while status_payload["active"] and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                        status_payload = client.get(f"/api/jobs/{job.id}/ai-refinement").json()
+                    self.assertEqual(status_payload["state"], "completed")
+                    sections = status_payload["result"]["sections"]
+                    self.assertNotIn("original", sections)
+                    self.assertIn("다음 주까지 초안을 준비하겠습니다.", sections["refined"])
+                    self.assertIn("초안 준비 일정과 확인 작업을 논의했다.", sections["summary"])
+                    self.assertNotIn("프로젝트 매니저", str(status_payload))
+            finally:
+                manager.shutdown()
 
     def test_server_disables_missing_models_and_rejects_their_uploads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
