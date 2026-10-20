@@ -54,9 +54,14 @@ class FakeLocalLLMClient:
         temperature: float,
         max_tokens: int,
         json_mode: bool = False,
+        reasoning_effort: str | None = None,
+        reasoning_effort_retry_levels: tuple[str, ...] = (),
         retry_on_length: bool = False,
+        retry_reset_max_tokens: int | None = None,
         on_length_retry=None,
         on_length_retry_success=None,
+        on_reasoning_effort_fallback=None,
+        on_reasoning_effort_lowered=None,
         should_cancel=None,
     ) -> str:
         if should_cancel and should_cancel():
@@ -223,6 +228,8 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('id="server-setup"', page)
         self.assertIn('id="local-ai"', page)
         self.assertIn('/api/local-llm/verify', page)
+        self.assertIn('id="llm-auto-lower-reasoning"', page)
+        self.assertIn('/api/local-llm/reasoning-effort', page)
         self.assertIn('id="llm-api-key"', page)
         self.assertIn('id="llm-url-options"', page)
         self.assertIn('id="ai-refinement"', page)
@@ -275,6 +282,12 @@ class ServerPageTests(unittest.TestCase):
                 self.assertTrue(verified.json()["connected"])
                 self.assertEqual(verified.json()["model"], "talktracker-test")
                 self.assertEqual(verified.json()["recent_base_urls"], ["http://localhost:11434/v1"])
+                self.assertFalse(verified.json()["reasoning_effort"]["supported"])
+                unsupported_preference = client.post(
+                    "/api/local-llm/reasoning-effort",
+                    json={"auto_lower_on_length": True},
+                )
+                self.assertEqual(unsupported_preference.status_code, 422)
 
                 network_server = client.post(
                     "/api/local-llm/models",

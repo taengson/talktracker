@@ -1,4 +1,4 @@
-"""Safe, short-transcript refinement through an OpenAI-compatible LLM.
+"""Safe, chunked transcript refinement through an OpenAI-compatible LLM.
 
 The original transcription stays immutable.  A model only returns replacement
 text keyed by an internal segment id, so speaker names, timing, and ordering
@@ -12,16 +12,27 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .llm_client import LocalLLMError, OpenAICompatibleLocalClient
+from .llm_client import LocalLLMError, LocalLLMResponseLengthError, OpenAICompatibleLocalClient
 
 if TYPE_CHECKING:
     from .analysis import AnalysisResult, Utterance
 
 
-PROMPT_VERSION = "2026-10-19.1"
+PROMPT_VERSION = "2026-10-20.2"
 ProgressCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 LengthRetrySuccessCallback = Callable[[int], None]
+ReasoningEffortFallbackCallback = Callable[[], None]
+
+# Keep each request small enough that a local model does not spend most of its
+# context window reasoning about one very long transcript.  We prefer utterance
+# boundaries, but a diarizer can group a long reading into one utterance.  Such
+# an utterance is split internally at sentence/word boundaries without changing
+# the original utterance, its timing, or its speaker in the rendered result.
+_TRANSCRIPT_CHUNK_PLANS = ((20, 2_400), (15, 1_800), (10, 1_200), (5, 600), (3, 360), (1, 180))
+_MAX_ATOMIC_SEGMENT_CHARACTERS = 160
+_MAX_SUMMARY_GROUP_CHARACTERS = 4_000
+_MAX_CHUNK_RESPONSE_TOKENS = 4_096
 
 
 class RefinementError(LocalLLMError):
@@ -136,11 +147,13 @@ def merge_ai_refinement_results(
 @dataclass(frozen=True)
 class _Segment:
     id: str
+    source_id: str
     utterance: "Utterance"
+    text: str
 
 
 class TranscriptRefiner:
-    """Build one JSON-only request for a short, already transcribed recording."""
+    """Refine an immutable transcript in small, independently validated chunks."""
 
     def __init__(self, client: OpenAICompatibleLocalClient | None) -> None:
         self.client = client
@@ -152,7 +165,10 @@ class TranscriptRefiner:
         *,
         model: str,
         response_token_limit: int | None = None,
+        reasoning_effort: str | None = None,
+        reasoning_effort_fallback_levels: tuple[str, ...] = (),
         on_length_retry_success: LengthRetrySuccessCallback | None = None,
+        on_reasoning_effort_fallback: ReasoningEffortFallbackCallback | None = None,
         progress: ProgressCallback | None = None,
         should_cancel: CancelCallback | None = None,
     ) -> AIRefinementResult:
@@ -165,46 +181,53 @@ class TranscriptRefiner:
             raise RefinementError("로컬 AI 연결을 확인한 뒤 다시 시도해 주세요.")
         self._raise_if_cancelled(should_cancel)
 
-        segments = tuple(_Segment(f"s-{index:04d}", utterance) for index, utterance in enumerate(analysis.utterances, start=1))
-        estimated_limit = max(1_024, min(8_192, 512 + sum(len(segment.utterance.text) for segment in segments) * 2))
-        remembered_limit = max(0, int(response_token_limit or 0))
-        requested_limit = max(estimated_limit, remembered_limit)
+        segments = _segments_for_utterances(analysis.utterances)
+        remembered_limit = min(_MAX_CHUNK_RESPONSE_TOKENS, max(0, int(response_token_limit or 0)))
         if progress:
             if remembered_limit:
                 progress("이전에 확인한 응답 길이 설정으로 AI 정리를 시작하고 있습니다…")
+            elif reasoning_effort_fallback_levels:
+                progress("중간 추론 강도로 AI 정리를 시작하고 있습니다. 응답 길이 한도에 도달하면 낮은 강도로 다시 시도합니다…")
+            elif reasoning_effort:
+                progress("중간 추론 강도로 AI 정리를 시작하고 있습니다…")
             else:
-                progress("AI가 짧은 전사 전체를 읽고 정리하고 있습니다…")
+                progress("AI가 전사 내용을 묶음으로 나누어 정리하고 있습니다…")
         successful_retry_limits: list[int] = []
-        response = self.client.create_chat_completion(
-            model,
-            messages=self._messages(segments, normalized),
-            temperature=0,
-            max_tokens=requested_limit,
-            json_mode=True,
-            retry_on_length=True,
-            on_length_retry=(
-                lambda _current_limit, _retry_limit: progress(
-                    "AI 응답 길이 한도에 도달해 더 큰 설정으로 다시 정리하고 있습니다. 완료되면 이 연결에 기억합니다…"
-                )
-                if progress
-                else None
-            ),
-            on_length_retry_success=successful_retry_limits.append,
-            should_cancel=should_cancel,
-        )
-        self._raise_if_cancelled(should_cancel)
-        payload = _parse_response_json(response)
         warnings: list[str] = []
         refined: dict[str, str] = {}
         if normalized.selection.refined:
-            refined, refinement_warnings = _validated_refinements(payload, segments)
+            refined, refinement_warnings = self._refine_transcript_batches(
+                segments,
+                normalized,
+                model=model,
+                remembered_limit=remembered_limit,
+                reasoning_effort=reasoning_effort,
+                reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+                successful_retry_limits=successful_retry_limits,
+                on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                progress=progress,
+                should_cancel=should_cancel,
+            )
             warnings.extend(refinement_warnings)
-        summary = _validated_summary(payload) if normalized.selection.summary else None
+        summary = None
+        if normalized.selection.summary:
+            summary = self._summarize_transcript_batches(
+                segments,
+                normalized,
+                model=model,
+                remembered_limit=remembered_limit,
+                reasoning_effort=reasoning_effort,
+                reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+                successful_retry_limits=successful_retry_limits,
+                on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                progress=progress,
+                should_cancel=should_cancel,
+            )
         if progress:
             progress("AI 정리 결과를 검증하고 있습니다…")
         result = AIRefinementResult(
             selection=normalized.selection,
-            refined_text_by_segment_id=refined,
+            refined_text_by_segment_id=_merge_refined_fragments(segments, refined),
             speaker_display_names={
                 guide.speaker: guide.display_name for guide in normalized.speaker_guides if guide.display_name
             },
@@ -217,22 +240,28 @@ class TranscriptRefiner:
         return result
 
     @staticmethod
-    def _messages(segments: tuple[_Segment, ...], request: AIRefinementRequest) -> list[dict[str, str]]:
+    def _messages(
+        segments: tuple[_Segment, ...], request: AIRefinementRequest, *, mode: str
+    ) -> list[dict[str, str]]:
         system = (
             "You refine a Korean conversation transcript. Use only the provided transcript and optional context. "
             "Do not invent facts, speakers, times, names, decisions, or action items. "
             "Use a supplied display_name as the speaker label in any generated wording about that speaker. "
             "Speaker guidance is only context and must not be output as a separate field. "
-            "Keep each segment's meaning. Return JSON only, with no markdown fence or explanation. "
-            "When refinement is requested, return every requested segment_id exactly once with a non-empty refined_text. "
-            "When summary is requested, return a summary object with overview (string), key_points, decisions, "
-            "action_items, and open_questions (arrays of strings). Use empty arrays when the transcript has no evidence."
+            "Return JSON only, with no markdown fence or explanation. "
         )
+        if mode == "refine":
+            system += "Keep each segment's meaning. Return every requested segment_id exactly once with a non-empty refined_text."
+        else:
+            system += (
+                "Return a summary object with overview (string), key_points, decisions, action_items, and open_questions "
+                "(arrays of strings). Use empty arrays when the transcript has no evidence."
+            )
         content = {
             "prompt_version": PROMPT_VERSION,
             "requested_output": {
-                "refined_conversation": request.selection.refined,
-                "summary": request.selection.summary,
+                "refined_conversation": mode == "refine",
+                "summary": mode == "summary",
             },
             "conversation_background": request.background,
             "speaker_guides": [
@@ -240,11 +269,10 @@ class TranscriptRefiner:
                 for guide in request.speaker_guides
             ],
             "segments": [
-                {"segment_id": segment.id, "speaker": segment.utterance.speaker, "text": segment.utterance.text}
+                {"segment_id": segment.id, "speaker": segment.utterance.speaker, "text": segment.text}
                 for segment in segments
             ],
             "response_shape": {
-                "segments": [{"segment_id": "s-0001", "refined_text": "..."}],
                 "summary": {
                     "overview": "...",
                     "key_points": ["..."],
@@ -254,15 +282,431 @@ class TranscriptRefiner:
                 },
             },
         }
+        if mode == "refine":
+            content["response_shape"] = {"segments": [{"segment_id": "s-0001", "refined_text": "..."}]}
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(content, ensure_ascii=False)},
         ]
 
+    def _refine_transcript_batches(
+        self,
+        segments: tuple[_Segment, ...],
+        request: AIRefinementRequest,
+        *,
+        model: str,
+        remembered_limit: int,
+        reasoning_effort: str | None,
+        reasoning_effort_fallback_levels: tuple[str, ...],
+        successful_retry_limits: list[int],
+        on_reasoning_effort_fallback: ReasoningEffortFallbackCallback | None,
+        progress: ProgressCallback | None,
+        should_cancel: CancelCallback | None,
+    ) -> tuple[dict[str, str], list[str]]:
+        batches = list(_segment_chunks(segments, _TRANSCRIPT_CHUNK_PLANS[0]))
+        plan_index = 0
+        batch_index = 0
+        refined: dict[str, str] = {}
+        warnings: list[str] = []
+        while batch_index < len(batches):
+            chunk = batches[batch_index]
+            # Repartitioning comes before changing the model's generation
+            # settings.  It preserves the normal medium-reasoning path and
+            # makes the next request genuinely smaller instead of repeating
+            # the same oversized work with a different model option.
+            repartitioned = _lower_unfinished_transcript_batches(batches, batch_index, plan_index)
+            if progress:
+                progress(f"다듬은 대화 {batch_index + 1}/{len(batches)} 묶음을 AI로 정리하고 있습니다…")
+            try:
+                payload = self._request_json(
+                    model,
+                    self._messages(chunk, request, mode="refine"),
+                    response_token_limit=_chunk_response_limit(chunk, remembered_limit),
+                    reasoning_effort=reasoning_effort,
+                    reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+                    allow_length_retry=repartitioned is None,
+                    successful_retry_limits=successful_retry_limits,
+                    on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                    progress=progress,
+                    should_cancel=should_cancel,
+                )
+            except LocalLLMResponseLengthError as error:
+                if repartitioned is None:
+                    raise _unrecoverable_transcript_batch_error(error) from error
+                plan_index, replacement = repartitioned
+                batches[batch_index:] = replacement
+                if progress:
+                    progress(
+                        f"응답 길이 한도에 도달했습니다. 완료한 {batch_index}개 묶음은 유지하고, "
+                        f"남은 전사를 더 작게 나누어 다시 정리하고 있습니다…"
+                    )
+                continue
+            chunk_refined, chunk_warnings = _validated_refinements(payload, chunk)
+            refined.update(chunk_refined)
+            warnings.extend(chunk_warnings)
+            batch_index += 1
+        return refined, warnings
+
+    def _summarize_transcript_batches(
+        self,
+        segments: tuple[_Segment, ...],
+        request: AIRefinementRequest,
+        *,
+        model: str,
+        remembered_limit: int,
+        reasoning_effort: str | None,
+        reasoning_effort_fallback_levels: tuple[str, ...],
+        successful_retry_limits: list[int],
+        on_reasoning_effort_fallback: ReasoningEffortFallbackCallback | None,
+        progress: ProgressCallback | None,
+        should_cancel: CancelCallback | None,
+    ) -> ConversationSummary:
+        batches = list(_segment_chunks(segments, _TRANSCRIPT_CHUNK_PLANS[0]))
+        plan_index = 0
+        batch_index = 0
+        summaries: list[ConversationSummary] = []
+        while batch_index < len(batches):
+            chunk = batches[batch_index]
+            repartitioned = _lower_unfinished_transcript_batches(batches, batch_index, plan_index)
+            if progress:
+                progress(f"요약을 위해 전사 {batch_index + 1}/{len(batches)} 묶음을 읽고 있습니다…")
+            try:
+                payload = self._request_json(
+                    model,
+                    self._messages(chunk, request, mode="summary"),
+                    response_token_limit=_summary_response_limit(chunk, remembered_limit),
+                    reasoning_effort=reasoning_effort,
+                    reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+                    allow_length_retry=repartitioned is None,
+                    successful_retry_limits=successful_retry_limits,
+                    on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                    progress=progress,
+                    should_cancel=should_cancel,
+                )
+            except LocalLLMResponseLengthError as error:
+                if repartitioned is None:
+                    raise _unrecoverable_transcript_batch_error(error) from error
+                plan_index, replacement = repartitioned
+                batches[batch_index:] = replacement
+                if progress:
+                    progress(
+                        f"응답 길이 한도에 도달했습니다. 만든 {batch_index}개 부분 요약은 유지하고, "
+                        f"남은 전사를 더 작게 나누어 다시 요약하고 있습니다…"
+                    )
+                continue
+            summaries.append(_validated_summary(payload))
+            batch_index += 1
+        return self._combine_summaries(
+            summaries,
+            model=model,
+            remembered_limit=remembered_limit,
+            reasoning_effort=reasoning_effort,
+            reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+            successful_retry_limits=successful_retry_limits,
+            on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+            progress=progress,
+            should_cancel=should_cancel,
+        )
+
+    def _combine_summaries(
+        self,
+        summaries: list[ConversationSummary],
+        *,
+        model: str,
+        remembered_limit: int,
+        reasoning_effort: str | None,
+        reasoning_effort_fallback_levels: tuple[str, ...],
+        successful_retry_limits: list[int],
+        on_reasoning_effort_fallback: ReasoningEffortFallbackCallback | None,
+        progress: ProgressCallback | None,
+        should_cancel: CancelCallback | None,
+    ) -> ConversationSummary:
+        while len(summaries) > 1:
+            groups = _summary_groups(tuple(summaries))
+            # A malformed-but-valid model response can contain an unusually
+            # verbose partial summary.  Do not loop forever on singleton
+            # groups; reduce neighbouring summaries in that exceptional case.
+            if len(groups) == len(summaries):
+                groups = tuple(tuple(summaries[index : index + 2]) for index in range(0, len(summaries), 2))
+            next_summaries: list[ConversationSummary] = []
+            for index, group in enumerate(groups, start=1):
+                if progress:
+                    progress(f"부분 요약 {index}/{len(groups)} 묶음을 합치고 있습니다…")
+                payload = self._request_json(
+                    model,
+                    self._summary_reduction_messages(group),
+                    response_token_limit=_summary_reduction_limit(group, remembered_limit),
+                    reasoning_effort=reasoning_effort,
+                    reasoning_effort_fallback_levels=reasoning_effort_fallback_levels,
+                    # A final map/reduce group has no transcript boundary to
+                    # repartition, so use the bounded model-setting retries.
+                    allow_length_retry=True,
+                    successful_retry_limits=successful_retry_limits,
+                    on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                    progress=progress,
+                    should_cancel=should_cancel,
+                )
+                next_summaries.append(_validated_summary(payload))
+            summaries = next_summaries
+        return summaries[0]
+
+    def _request_json(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        response_token_limit: int,
+        reasoning_effort: str | None,
+        reasoning_effort_fallback_levels: tuple[str, ...],
+        allow_length_retry: bool,
+        successful_retry_limits: list[int],
+        on_reasoning_effort_fallback: ReasoningEffortFallbackCallback | None,
+        progress: ProgressCallback | None,
+        should_cancel: CancelCallback | None,
+    ) -> dict[str, Any]:
+        assert self.client is not None
+
+        def effort_fallback() -> None:
+            if on_reasoning_effort_fallback:
+                on_reasoning_effort_fallback()
+            if progress:
+                progress("서버가 추론 강도 설정을 지원하지 않아 기본 설정으로 계속 정리하고 있습니다…")
+
+        def effort_lowered(effort: str) -> None:
+            if progress:
+                label = "중간" if effort == "medium" else "낮은"
+                progress(f"응답 길이 한도에 도달해 추론 강도를 {label} 수준으로 낮추고 같은 묶음을 다시 정리하고 있습니다…")
+
+        response = self.client.create_chat_completion(
+            model,
+            messages=messages,
+            temperature=0,
+            max_tokens=response_token_limit,
+            json_mode=True,
+            reasoning_effort=reasoning_effort,
+            reasoning_effort_retry_levels=(reasoning_effort_fallback_levels if allow_length_retry else ()),
+            retry_on_length=allow_length_retry,
+            on_length_retry=(
+                lambda _current_limit, _retry_limit: progress(
+                    "AI 응답 길이 한도에 도달해 이 묶음만 더 큰 설정으로 다시 정리하고 있습니다…"
+                )
+                if progress
+                else None
+            ),
+            on_length_retry_success=successful_retry_limits.append,
+            on_reasoning_effort_fallback=effort_fallback if reasoning_effort else None,
+            on_reasoning_effort_lowered=effort_lowered if reasoning_effort_fallback_levels else None,
+            should_cancel=should_cancel,
+        )
+        self._raise_if_cancelled(should_cancel)
+        return _parse_response_json(response)
+
+    @staticmethod
+    def _summary_reduction_messages(summaries: tuple[ConversationSummary, ...]) -> list[dict[str, str]]:
+        system = (
+            "You combine partial Korean conversation summaries. Use only the supplied summaries. "
+            "Do not invent facts, decisions, action items, names, or open questions. "
+            "Return JSON only, with no markdown fence or explanation. Return a summary object with overview (string), "
+            "key_points, decisions, action_items, and open_questions (arrays of strings). Use empty arrays when there is no evidence."
+        )
+        content = {
+            "prompt_version": PROMPT_VERSION,
+            "partial_summaries": [_summary_as_payload(summary) for summary in summaries],
+            "response_shape": {
+                "summary": {
+                    "overview": "...",
+                    "key_points": ["..."],
+                    "decisions": ["..."],
+                    "action_items": ["..."],
+                    "open_questions": ["..."],
+                }
+            },
+        }
+        return [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(content, ensure_ascii=False)}]
+
     @staticmethod
     def _raise_if_cancelled(should_cancel: CancelCallback | None) -> None:
         if should_cancel and should_cancel():
             raise RefinementCancelled("AI 정리 요청을 취소했습니다.")
+
+
+def _segments_for_utterances(utterances: list["Utterance"]) -> tuple[_Segment, ...]:
+    """Create request-only segments while retaining each source utterance id.
+
+    Speaker diarization sometimes produces one very long utterance for a
+    reading or monologue.  Treating that utterance as indivisible defeats all
+    later batch plans.  These request segments are deliberately internal: the
+    final rendered transcript still has exactly the original utterance timing
+    and speaker rows.
+    """
+
+    segments: list[_Segment] = []
+    for index, utterance in enumerate(utterances, start=1):
+        source_id = f"s-{index:04d}"
+        fragments = _split_utterance_for_request(utterance.text)
+        multiple_fragments = len(fragments) > 1
+        for fragment_index, text in enumerate(fragments, start=1):
+            segment_id = f"{source_id}-p{fragment_index:02d}" if multiple_fragments else source_id
+            segments.append(_Segment(segment_id, source_id, utterance, text))
+    return tuple(segments)
+
+
+def _split_utterance_for_request(text: str) -> tuple[str, ...]:
+    """Prefer sentence boundaries and use whitespace only as a last resort."""
+
+    value = text.strip()
+    if len(value) <= _MAX_ATOMIC_SEGMENT_CHARACTERS:
+        return (value,)
+
+    sentences: list[str] = []
+    current: list[str] = []
+    for character in value:
+        current.append(character)
+        if character in ".?!。！？\n":
+            sentence = "".join(current).strip()
+            if sentence:
+                sentences.append(sentence)
+            current = []
+    trailing = "".join(current).strip()
+    if trailing:
+        sentences.append(trailing)
+    if not sentences:
+        sentences = [value]
+
+    bounded_sentences: list[str] = []
+    for sentence in sentences:
+        remaining = sentence
+        while len(remaining) > _MAX_ATOMIC_SEGMENT_CHARACTERS:
+            boundary = remaining.rfind(" ", 0, _MAX_ATOMIC_SEGMENT_CHARACTERS + 1)
+            if boundary <= 0:
+                boundary = _MAX_ATOMIC_SEGMENT_CHARACTERS
+            bounded_sentences.append(remaining[:boundary].strip())
+            remaining = remaining[boundary:].strip()
+        if remaining:
+            bounded_sentences.append(remaining)
+
+    fragments: list[str] = []
+    current_fragment = ""
+    for sentence in bounded_sentences:
+        candidate = f"{current_fragment} {sentence}".strip() if current_fragment else sentence
+        if current_fragment and len(candidate) > _MAX_ATOMIC_SEGMENT_CHARACTERS:
+            fragments.append(current_fragment)
+            current_fragment = sentence
+        else:
+            current_fragment = candidate
+    if current_fragment:
+        fragments.append(current_fragment)
+    return tuple(fragments) or (value,)
+
+
+def _merge_refined_fragments(segments: tuple[_Segment, ...], replacements: dict[str, str]) -> dict[str, str]:
+    """Fold request-only fragments back into their immutable source utterance."""
+
+    by_source: dict[str, list[_Segment]] = {}
+    for segment in segments:
+        by_source.setdefault(segment.source_id, []).append(segment)
+
+    merged: dict[str, str] = {}
+    for source_id, fragments in by_source.items():
+        if not any(fragment.id in replacements for fragment in fragments):
+            continue
+        merged[source_id] = " ".join(replacements.get(fragment.id, fragment.text) for fragment in fragments).strip()
+    return merged
+
+
+def _segment_chunks(
+    segments: tuple[_Segment, ...], plan: tuple[int, int]
+) -> tuple[tuple[_Segment, ...], ...]:
+    """Split at utterance boundaries while keeping every segment exactly once."""
+
+    maximum_segments, maximum_characters = plan
+    chunks: list[tuple[_Segment, ...]] = []
+    current: list[_Segment] = []
+    current_size = 0
+    for segment in segments:
+        segment_size = max(1, len(segment.text))
+        if current and (len(current) >= maximum_segments or current_size + segment_size > maximum_characters):
+            chunks.append(tuple(current))
+            current, current_size = [], 0
+        current.append(segment)
+        current_size += segment_size
+    if current:
+        chunks.append(tuple(current))
+    return tuple(chunks)
+
+
+def _lower_unfinished_transcript_batches(
+    batches: list[tuple[_Segment, ...]], batch_index: int, plan_index: int
+) -> tuple[int, list[tuple[_Segment, ...]]] | None:
+    """Repartition only the failed batch and its unfinished successors.
+
+    This mirrors the review-batch recovery approach: completed batches remain
+    untouched, while a failure makes all remaining work smaller in one
+    direction.  A batch that contains one indivisible utterance cannot be
+    safely cut in the middle, so it is reported instead of looping forever.
+    """
+
+    failed_batch = batches[batch_index]
+    remaining_segments = tuple(segment for batch in batches[batch_index:] for segment in batch)
+    for candidate_index in range(plan_index + 1, len(_TRANSCRIPT_CHUNK_PLANS)):
+        candidate_plan = _TRANSCRIPT_CHUNK_PLANS[candidate_index]
+        if len(_segment_chunks(failed_batch, candidate_plan)) <= 1:
+            continue
+        return candidate_index, list(_segment_chunks(remaining_segments, candidate_plan))
+    return None
+
+
+def _unrecoverable_transcript_batch_error(error: LocalLLMResponseLengthError) -> RefinementError:
+    return RefinementError(
+        "AI 응답 길이 한도에 계속 도달했습니다. 이 전사 묶음은 문장·공백 경계를 더 작게 나눌 수 없습니다. "
+        "로컬 AI 서버의 응답 길이 설정을 확인해 주세요."
+    )
+
+
+def _chunk_response_limit(chunks: tuple[_Segment, ...], remembered_limit: int = 0) -> int:
+    characters = sum(len(segment.text) for segment in chunks)
+    estimated = max(1_024, min(2_048, 512 + characters))
+    return min(_MAX_CHUNK_RESPONSE_TOKENS, max(estimated, remembered_limit))
+
+
+def _summary_response_limit(chunks: tuple[_Segment, ...], remembered_limit: int = 0) -> int:
+    characters = sum(len(segment.text) for segment in chunks)
+    estimated = max(1_024, min(1_536, 384 + characters // 2))
+    return min(_MAX_CHUNK_RESPONSE_TOKENS, max(estimated, remembered_limit))
+
+
+def _summary_reduction_limit(summaries: tuple[ConversationSummary, ...], remembered_limit: int = 0) -> int:
+    characters = sum(len(json.dumps(_summary_as_payload(summary), ensure_ascii=False)) for summary in summaries)
+    estimated = max(512, min(1_536, 384 + characters // 2))
+    return min(_MAX_CHUNK_RESPONSE_TOKENS, max(estimated, remembered_limit))
+
+
+def _summary_as_payload(summary: ConversationSummary) -> dict[str, object]:
+    return {
+        "overview": summary.overview,
+        "key_points": list(summary.key_points),
+        "decisions": list(summary.decisions),
+        "action_items": list(summary.action_items),
+        "open_questions": list(summary.open_questions),
+    }
+
+
+def _summary_groups(summaries: tuple[ConversationSummary, ...]) -> tuple[tuple[ConversationSummary, ...], ...]:
+    """Group short partial summaries for recursive map/reduce summarisation."""
+
+    groups: list[tuple[ConversationSummary, ...]] = []
+    current: list[ConversationSummary] = []
+    current_size = 0
+    for summary in summaries:
+        summary_size = max(1, len(json.dumps(_summary_as_payload(summary), ensure_ascii=False)))
+        if current and current_size + summary_size > _MAX_SUMMARY_GROUP_CHARACTERS:
+            groups.append(tuple(current))
+            current, current_size = [], 0
+        current.append(summary)
+        current_size += summary_size
+    if current:
+        groups.append(tuple(current))
+    return tuple(groups)
 
 
 def render_original_conversation(analysis: "AnalysisResult") -> str:
@@ -386,7 +830,10 @@ def _parse_response_json(response: str) -> dict[str, Any]:
 def _validated_refinements(payload: dict[str, Any], segments: tuple[_Segment, ...]) -> tuple[dict[str, str], list[str]]:
     response_segments = payload.get("segments")
     if not isinstance(response_segments, list):
-        return {}, ["AI가 다듬은 대화의 구간 목록을 반환하지 않아 원본 전사문을 유지했습니다."]
+        raise RefinementError(
+            "AI가 다듬은 대화의 구간 목록을 반환하지 않았습니다. "
+            "결과를 적용하지 않았으니 다시 시도해 주세요."
+        )
     expected = {segment.id for segment in segments}
     valid: dict[str, str] = {}
     invalid_count = 0
@@ -407,6 +854,11 @@ def _validated_refinements(payload: dict[str, Any], segments: tuple[_Segment, ..
             invalid_count += 1
             continue
         valid[segment_id] = text.strip()
+    if not valid:
+        raise RefinementError(
+            "AI가 적용할 수 있는 다듬은 대화 구간을 반환하지 않았습니다. "
+            "결과를 적용하지 않았으니 다시 시도해 주세요."
+        )
     missing = len(expected - set(valid))
     warnings: list[str] = []
     if invalid_count or missing:

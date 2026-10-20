@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
+from types import SimpleNamespace
 
 from talktracker.core.analysis import AnalysisResult, Utterance
+from talktracker.core.llm_client import LocalLLMResponseLengthError
+from talktracker.core.llm_config import LocalLLMReasoningEffort, LocalLLMSettings
 from talktracker.core.refinement import (
     AIRefinementRequest,
     AIRefinementResult,
@@ -18,6 +22,7 @@ from talktracker.core.refinement import (
     render_result_documents,
     render_summary,
 )
+from talktracker.core.workflow import AIRefinementManager
 
 
 class _FakeClient:
@@ -33,9 +38,13 @@ class _FakeClient:
         temperature: float,
         max_tokens: int,
         json_mode: bool = False,
+        reasoning_effort: str | None = None,
+        reasoning_effort_retry_levels: tuple[str, ...] = (),
         retry_on_length: bool = False,
         on_length_retry=None,
         on_length_retry_success=None,
+        on_reasoning_effort_fallback=None,
+        on_reasoning_effort_lowered=None,
         should_cancel=None,
     ) -> str:
         self.request = {
@@ -44,12 +53,152 @@ class _FakeClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "json_mode": json_mode,
+            "reasoning_effort": reasoning_effort,
+            "reasoning_effort_retry_levels": reasoning_effort_retry_levels,
             "retry_on_length": retry_on_length,
             "on_length_retry_success": on_length_retry_success,
         }
         if should_cancel and should_cancel():
             raise AssertionError("cancelled requests should not call the client")
         return json.dumps(self.response, ensure_ascii=False)
+
+
+class _ReasoningConnectionManager:
+    """Minimal verified connection used to exercise the worker's request policy."""
+
+    def __init__(self, client: _FakeClient, *, auto_lower_on_length: bool) -> None:
+        self.client = client
+        self.settings = LocalLLMSettings(
+            base_url="http://localhost:11434/v1",
+            model="Qwen-test",
+            reasoning_efforts=(
+                LocalLLMReasoningEffort(
+                    "http://localhost:11434/v1",
+                    "Qwen-test",
+                    ("medium", "low"),
+                    auto_lower_on_length,
+                ),
+            ),
+        )
+
+    def snapshot(self):
+        return SimpleNamespace(settings=self.settings)
+
+    def active_client(self) -> _FakeClient:
+        return self.client
+
+    def remember_response_token_limit(self, *args, **kwargs) -> None:
+        return None
+
+    def disable_reasoning_effort(self, *args, **kwargs) -> None:
+        return None
+
+
+class _ChunkingFakeClient:
+    """Returns a schema-correct result for whichever bounded request it sees."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def create_chat_completion(self, model: str, *, messages, **kwargs) -> str:
+        payload = json.loads(messages[1]["content"])
+        self.requests.append({"model": model, "payload": payload, **kwargs})
+        if payload.get("requested_output", {}).get("refined_conversation"):
+            return json.dumps(
+                {
+                    "segments": [
+                        {"segment_id": segment["segment_id"], "refined_text": f"다듬은 {segment['text']}"}
+                        for segment in payload["segments"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "summary": {
+                    "overview": "전사 묶음을 요약했습니다.",
+                    "key_points": ["핵심 내용을 확인했습니다."],
+                    "decisions": [],
+                    "action_items": [],
+                    "open_questions": [],
+                }
+            },
+            ensure_ascii=False,
+        )
+
+
+class _RepartitioningFakeClient:
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+        self.retry_on_length: list[bool] = []
+        self.failed_once = False
+
+    def create_chat_completion(self, model: str, *, messages, **kwargs) -> str:
+        payload = json.loads(messages[1]["content"])
+        segments = payload.get("segments", [])
+        self.batch_sizes.append(len(segments))
+        self.retry_on_length.append(bool(kwargs.get("retry_on_length")))
+        if not self.failed_once:
+            self.failed_once = True
+            raise LocalLLMResponseLengthError("AI 응답 길이 한도에 도달했습니다.")
+        return json.dumps(
+            {
+                "segments": [
+                    {"segment_id": segment["segment_id"], "refined_text": f"다듬은 {segment['text']}"}
+                    for segment in segments
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+class _RepartitionAfterSuccessFakeClient(_RepartitioningFakeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def create_chat_completion(self, model: str, *, messages, **kwargs) -> str:
+        self.calls += 1
+        payload = json.loads(messages[1]["content"])
+        segments = payload.get("segments", [])
+        self.batch_sizes.append(len(segments))
+        if self.calls == 2:
+            raise LocalLLMResponseLengthError("AI 응답 길이 한도에 도달했습니다.")
+        return json.dumps(
+            {
+                "segments": [
+                    {"segment_id": segment["segment_id"], "refined_text": f"다듬은 {segment['text']}"}
+                    for segment in segments
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+class _SummaryRepartitioningFakeClient:
+    def __init__(self) -> None:
+        self.transcript_batch_sizes: list[int] = []
+        self.failed_once = False
+
+    def create_chat_completion(self, model: str, *, messages, **kwargs) -> str:
+        payload = json.loads(messages[1]["content"])
+        if "segments" in payload:
+            self.transcript_batch_sizes.append(len(payload["segments"]))
+            if not self.failed_once:
+                self.failed_once = True
+                raise LocalLLMResponseLengthError("AI 응답 길이 한도에 도달했습니다.")
+        return json.dumps(
+            {
+                "summary": {
+                    "overview": "발화 묶음을 요약했습니다.",
+                    "key_points": [],
+                    "decisions": [],
+                    "action_items": [],
+                    "open_questions": [],
+                }
+            },
+            ensure_ascii=False,
+        )
 
 
 def _analysis() -> AnalysisResult:
@@ -101,7 +250,9 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertIn("초안 준비 일정을 확인했다.", render_summary(result.summary))
         self.assertEqual(client.request["model"], "local-model")
         self.assertTrue(client.request["json_mode"])
-        self.assertTrue(client.request["retry_on_length"])
+        # A two-segment transcript can still be repartitioned into individual
+        # requests, so it must do that before adjusting model settings.
+        self.assertFalse(client.request["retry_on_length"])
         payload = json.loads(client.request["messages"][1]["content"])
         self.assertEqual(
             payload["speaker_guides"],
@@ -134,6 +285,177 @@ class TranscriptRefinerTests(unittest.TestCase):
 
         self.assertEqual(client.request["max_tokens"], 4_096)
         self.assertIn("이전에 확인한 응답 길이 설정", progress[0])
+
+    def test_automatic_reasoning_starts_at_medium_effort(self) -> None:
+        client = _FakeClient(
+            {
+                "segments": [
+                    {"segment_id": "s-0001", "refined_text": "첫 문장을 다듬었습니다."},
+                    {"segment_id": "s-0002", "refined_text": "둘째 문장을 다듬었습니다."},
+                ]
+            }
+        )
+        progress: list[str] = []
+
+        TranscriptRefiner(client).refine(
+            _analysis(),
+            AIRefinementRequest(selection=ResultSelection(refined=True)),
+            model="Qwen3.8-27B",
+            reasoning_effort="medium",
+            reasoning_effort_fallback_levels=("low",),
+            progress=progress.append,
+        )
+
+        self.assertEqual(client.request["reasoning_effort"], "medium")
+        # The automatic fallback is deliberately held back until a request
+        # cannot be repartitioned any further.
+        self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
+        self.assertIn("중간 추론 강도", progress[0])
+
+    def test_verified_reasoning_model_starts_at_medium_when_auto_adjustment_is_off(self) -> None:
+        client = _FakeClient(
+            {
+                "segments": [
+                    {"segment_id": "s-0001", "refined_text": "첫 문장을 다듬었습니다."},
+                    {"segment_id": "s-0002", "refined_text": "둘째 문장을 다듬었습니다."},
+                ]
+            }
+        )
+        manager = AIRefinementManager(_ReasoningConnectionManager(client, auto_lower_on_length=False))
+        manager.start(_analysis(), AIRefinementRequest(selection=ResultSelection(refined=True)))
+        deadline = time.monotonic() + 1
+        while manager.snapshot().active and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(manager.snapshot().state, "completed")
+        assert client.request is not None
+        self.assertEqual(client.request["reasoning_effort"], "medium")
+        self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
+
+    def test_long_transcript_is_chunked_and_its_results_are_merged(self) -> None:
+        client = _ChunkingFakeClient()
+        analysis = AnalysisResult(
+            source_name="long.m4a",
+            duration=30,
+            speaker_segments=[],
+            utterances=[
+                Utterance(float(index), float(index + 1), "화자 1", f"발화 {index} " + ("가" * 800))
+                for index in range(4)
+            ],
+            whisper_profile="빠른 전사",
+        )
+        progress: list[str] = []
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(refined=True, summary=True)),
+            model="local-model",
+            progress=progress.append,
+        )
+
+        refined_requests = [
+            item for item in client.requests if item["payload"].get("requested_output", {}).get("refined_conversation")
+        ]
+        summary_requests = [
+            item for item in client.requests if item["payload"].get("requested_output", {}).get("summary")
+        ]
+        reduction_requests = [item for item in client.requests if "partial_summaries" in item["payload"]]
+        self.assertEqual(len(refined_requests), 2)
+        self.assertEqual(len(summary_requests), 2)
+        self.assertEqual(len(reduction_requests), 1)
+        self.assertEqual(set(result.refined_text_by_segment_id), {"s-0001", "s-0002", "s-0003", "s-0004"})
+        self.assertIsNotNone(result.summary)
+        self.assertTrue(any("다듬은 대화 1/2" in message for message in progress))
+        self.assertTrue(any("부분 요약 1/1" in message for message in progress))
+
+    def test_long_single_utterance_is_repartitioned_at_sentence_boundaries(self) -> None:
+        client = _RepartitioningFakeClient()
+        long_reading = " ".join(("가" * 150 + ".", "나" * 150 + ".", "다" * 150 + "."))
+        analysis = AnalysisResult(
+            source_name="reading.m4a",
+            duration=30,
+            speaker_segments=[],
+            utterances=[Utterance(0, 30, "화자 1", long_reading)],
+            whisper_profile="빠른 전사",
+        )
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(refined=True)),
+            model="local-model",
+        )
+
+        # The long diarization utterance becomes three request fragments.  On
+        # a length failure, only those unfinished fragments are divided again.
+        self.assertEqual(client.batch_sizes, [3, 2, 1])
+        self.assertEqual(client.retry_on_length, [False, False, True])
+        self.assertEqual(set(result.refined_text_by_segment_id), {"s-0001"})
+        rendered = render_refined_conversation(analysis, result)
+        self.assertEqual(rendered.count("(화자 1)"), 1)
+        self.assertIn("다듬은", rendered)
+
+    def test_length_failure_repartitions_only_unfinished_utterance_batches(self) -> None:
+        client = _RepartitioningFakeClient()
+        analysis = AnalysisResult(
+            source_name="retry.m4a",
+            duration=16,
+            speaker_segments=[],
+            utterances=[Utterance(float(index), float(index + 1), "화자 1", f"짧은 발화 {index}") for index in range(8)],
+            whisper_profile="빠른 전사",
+        )
+        progress: list[str] = []
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(refined=True)),
+            model="local-model",
+            progress=progress.append,
+        )
+
+        self.assertEqual(client.batch_sizes, [8, 5, 3])
+        self.assertEqual(set(result.refined_text_by_segment_id), {f"s-{index:04d}" for index in range(1, 9)})
+        self.assertTrue(any("완료한 0개 묶음은 유지" in message for message in progress))
+
+    def test_length_failure_keeps_completed_batches_before_repartitioning(self) -> None:
+        client = _RepartitionAfterSuccessFakeClient()
+        analysis = AnalysisResult(
+            source_name="resume.m4a",
+            duration=60,
+            speaker_segments=[],
+            utterances=[Utterance(float(index), float(index + 1), "화자 1", f"발화 {index}") for index in range(30)],
+            whisper_profile="빠른 전사",
+        )
+        progress: list[str] = []
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(refined=True)),
+            model="local-model",
+            progress=progress.append,
+        )
+
+        self.assertEqual(client.batch_sizes, [20, 10, 5, 5])
+        self.assertEqual(set(result.refined_text_by_segment_id), {f"s-{index:04d}" for index in range(1, 31)})
+        self.assertTrue(any("완료한 1개 묶음은 유지" in message for message in progress))
+
+    def test_summary_repartitions_unfinished_transcript_batches(self) -> None:
+        client = _SummaryRepartitioningFakeClient()
+        analysis = AnalysisResult(
+            source_name="summary-retry.m4a",
+            duration=16,
+            speaker_segments=[],
+            utterances=[Utterance(float(index), float(index + 1), "화자 1", f"짧은 발화 {index}") for index in range(8)],
+            whisper_profile="빠른 전사",
+        )
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(summary=True)),
+            model="local-model",
+        )
+
+        self.assertEqual(client.transcript_batch_sizes, [8, 5, 3])
+        self.assertIsNotNone(result.summary)
 
     def test_summary_created_later_keeps_the_existing_refined_conversation(self) -> None:
         refined = AIRefinementResult(
@@ -179,6 +501,19 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertIn("좋습니다 일정 확인 해주세요", rendered)
         self.assertNotIn("이 문장은 사용하면 안 됩니다.", rendered)
         self.assertTrue(result.warnings)
+
+    def test_refinement_without_any_valid_segment_fails_without_applying_speaker_names(self) -> None:
+        client = _FakeClient({"segments": [{"segment_id": "unknown", "refined_text": "사용하면 안 됩니다."}]})
+
+        with self.assertRaisesRegex(RefinementError, "적용할 수 있는 다듬은 대화 구간"):
+            TranscriptRefiner(client).refine(
+                _analysis(),
+                AIRefinementRequest(
+                    selection=ResultSelection(refined=True),
+                    speaker_guides=(SpeakerGuide("화자 1", display_name="손태영"),),
+                ),
+                model="local-model",
+            )
 
     def test_original_only_does_not_require_a_model_connection(self) -> None:
         result = TranscriptRefiner(None).refine(

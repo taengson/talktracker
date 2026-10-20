@@ -359,7 +359,7 @@ def _index_page(
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [];
+  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [], llmReasoningSupported = false;
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token")?.value.trim() || "";
@@ -536,7 +536,17 @@ def _index_page(
     if (includeModel) { input.model = $("llm-model").value.trim(); if (!input.model) throw new Error("연결을 확인할 모델을 선택하거나 직접 입력해 주세요."); }
     return input;
   }
-  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); }
+  function updateLlmReasoningControl(connection) {
+    const settings = connection.reasoning_effort || {}, levels = settings.supported_levels || [];
+    llmReasoningSupported = Boolean(settings.supported && levels.includes("medium") && levels.includes("low"));
+    const checkbox = $("llm-auto-lower-reasoning");
+    checkbox.checked = Boolean(settings.auto_lower_on_length);
+    checkbox.disabled = !llmReasoningSupported;
+    $("llm-reasoning-hint").textContent = llmReasoningSupported
+      ? "지원 확인됨: 항상 중간 강도로 시작합니다. 켜면 응답 길이 한도에서 낮은 강도로 조정합니다. 기본값은 꺼짐입니다."
+      : "선택한 서버·모델에서 추론 강도 자동 조정을 확인하지 못했습니다. 연결 확인 뒤 지원 여부가 표시됩니다.";
+  }
+  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); $("llm-auto-lower-reasoning").disabled = value || !llmReasoningSupported; }
   async function loadLlmConnection() {
     try {
       const connection = await request("/api/local-llm");
@@ -544,6 +554,7 @@ def _index_page(
       else if (!$("llm-url").value) $("llm-url").value = "http://127.0.0.1:8000";
       if (connection.model) $("llm-model").value = connection.model;
       setLlmRecentServers(connection.recent_base_urls || []);
+      updateLlmReasoningControl(connection);
       setLlmStatus(connection.message, false);
     } catch (error) { setLlmStatus(error.message, true); }
   }
@@ -564,10 +575,23 @@ def _index_page(
     try {
       const connection = await request("/api/local-llm/verify", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)});
       const suffix = connection.response_preview ? ` 응답: ${connection.response_preview}` : "";
-      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.${suffix}`);
+      updateLlmReasoningControl(connection);
+      const levels = connection.reasoning_effort?.supported_levels || [];
+      const reasoning = levels.includes("medium") && levels.includes("low") ? ` 추론 강도 자동 조정 지원도 확인했습니다 (${levels.map((level) => level === "medium" ? "중간" : "낮음").join(", ")}).` : " 추론 강도 자동 조정은 이 서버·모델에서 사용할 수 없습니다.";
+      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.${reasoning}${suffix}`);
       setLlmRecentServers(connection.recent_base_urls || []);
       $("llm-api-key").value = "";
     } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
+  }
+  async function updateLlmReasoningPreference() {
+    const checkbox = $("llm-auto-lower-reasoning"), requested = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      const connection = await request("/api/local-llm/reasoning-effort", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({auto_lower_on_length:requested})});
+      updateLlmReasoningControl(connection);
+      setLlmStatus(requested ? "중간 추론 강도로 시작하고 필요하면 낮은 강도로 조정하도록 설정했습니다." : "중간 추론 강도로 시작하며, 응답 길이 한도에도 추론 강도를 낮추지 않도록 설정했습니다.");
+    } catch (error) { checkbox.checked = !requested; setLlmStatus(error.message, true); }
+    finally { checkbox.disabled = !llmReasoningSupported; }
   }
   async function loadProfiles() {
     const data = await request("/api/profiles"); profiles = data.profiles;
@@ -587,6 +611,7 @@ def _index_page(
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
   $("llm-load-models")?.addEventListener("click", loadLlmModels);
   $("llm-verify")?.addEventListener("click", verifyLlmConnection);
+  $("llm-auto-lower-reasoning")?.addEventListener("change", updateLlmReasoningPreference);
   ["ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
   $("ai-run").addEventListener("click", startAiRefinement);
   $("ai-cancel").addEventListener("click", cancelAiRefinement);
@@ -608,6 +633,7 @@ def _index_page(
     <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
     <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
     <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
+    <label class="choice"><input id="llm-auto-lower-reasoning" type="checkbox" disabled><span><strong>추론 강도 자동 조정</strong><span id="llm-reasoning-hint" class="choice-description">연결 확인 뒤 지원 여부가 표시됩니다.</span></span></label>
     <p id="llm-status" class="notice">로컬 AI 연결 상태를 확인하고 있습니다…</p>
   </section>
     """.replace("__LOCAL_LLM_NETWORK_NOTICE__", local_llm_network_notice) if local_llm_available else ""
@@ -682,6 +708,26 @@ def create_app(
                 detail="이 웹 서버에서는 로컬 AI 연결이 비활성화되어 있습니다. 폐쇄망에서 사용하려면 서버를 --allow-local-ai-over-network 옵션과 함께 다시 시작하세요.",
             )
 
+    def local_llm_payload() -> dict[str, Any]:
+        """Return non-secret connection state, including the opt-in setting."""
+
+        connection = local_llm_manager.snapshot()
+        settings = connection.settings
+        reasoning = settings.reasoning_effort_settings_for(settings.base_url, settings.model)
+        return {
+            "configured": settings.is_configured,
+            "connected": connection.connected,
+            "message": connection.message,
+            "base_url": settings.base_url,
+            "model": settings.model,
+            "recent_base_urls": list(settings.recent_base_urls),
+            "reasoning_effort": {
+                "supported": bool(reasoning and {"medium", "low"}.issubset(reasoning.supported_efforts)),
+                "supported_levels": list(reasoning.supported_efforts) if reasoning else [],
+                "auto_lower_on_length": bool(reasoning and reasoning.auto_lower_on_length),
+            },
+        }
+
     def snapshot_or_404(job_id: str) -> dict[str, Any]:
         try:
             return job_manager.snapshot(job_id)
@@ -739,15 +785,7 @@ def create_app(
 
     @app.get("/api/local-llm")
     def local_llm_status(_: None = Depends(require_access), _local: None = Depends(require_local_llm)) -> dict[str, Any]:
-        connection = local_llm_manager.snapshot()
-        return {
-            "configured": connection.settings.is_configured,
-            "connected": connection.connected,
-            "message": connection.message,
-            "base_url": connection.settings.base_url,
-            "model": connection.settings.model,
-            "recent_base_urls": list(connection.settings.recent_base_urls),
-        }
+        return local_llm_payload()
 
     @app.post("/api/local-llm/models")
     async def local_llm_models(
@@ -774,16 +812,27 @@ def create_app(
         except LocalLLMError as error:
             local_llm_manager.mark_disconnected()
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
-        connection = local_llm_manager.snapshot()
-        return {
-            "configured": connection.settings.is_configured,
-            "connected": connection.connected,
-            "message": connection.message,
-            "base_url": connection.settings.base_url,
-            "model": result.model,
-            "recent_base_urls": list(connection.settings.recent_base_urls),
-            "response_preview": result.response_preview,
-        }
+        payload = local_llm_payload()
+        payload.update({"model": result.model, "response_preview": result.response_preview})
+        return payload
+
+    @app.post("/api/local-llm/reasoning-effort")
+    async def update_reasoning_effort_preference(
+        request: Request,
+        _: None = Depends(require_access),
+        _local: None = Depends(require_local_llm),
+    ) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="추론 강도 설정 요청 형식이 올바르지 않습니다.") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("auto_lower_on_length"), bool):
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="추론 강도 자동 조정 값을 확인해 주세요.")
+        try:
+            local_llm_manager.set_auto_lower_reasoning_effort(payload["auto_lower_on_length"])
+        except LocalLLMError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
+        return local_llm_payload()
 
     @app.get("/api/jobs/{job_id}/ai-refinement")
     def ai_refinement_status(

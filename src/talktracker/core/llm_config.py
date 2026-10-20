@@ -25,6 +25,21 @@ class LocalLLMResponseTokenLimit:
 
 
 @dataclass(frozen=True)
+class LocalLLMReasoningEffort:
+    """Verified reasoning-effort support and preference for one connection.
+
+    A server accepting this optional OpenAI-compatible field is not a
+    property of the model weights alone.  Keep both the short-request result
+    and the user's opt-in preference tied to the exact server/model pair.
+    """
+
+    base_url: str
+    model: str
+    supported_efforts: tuple[str, ...] = ()
+    auto_lower_on_length: bool = False
+
+
+@dataclass(frozen=True)
 class LocalLLMSettings:
     """The local LLM preferences that may safely be written to disk.
 
@@ -38,6 +53,7 @@ class LocalLLMSettings:
     model: str = ""
     recent_base_urls: tuple[str, ...] = ()
     response_token_limits: tuple[LocalLLMResponseTokenLimit, ...] = ()
+    reasoning_efforts: tuple[LocalLLMReasoningEffort, ...] = ()
 
     @property
     def is_configured(self) -> bool:
@@ -50,6 +66,15 @@ class LocalLLMSettings:
         for item in self.response_token_limits:
             if item.base_url == base_url and item.model == normalized_model:
                 return item.max_tokens
+        return None
+
+    def reasoning_effort_settings_for(self, base_url: str, model: str) -> LocalLLMReasoningEffort | None:
+        """Return verified reasoning support for this exact server/model pair."""
+
+        normalized_model = model.strip()
+        for item in self.reasoning_efforts:
+            if item.base_url == base_url and item.model == normalized_model:
+                return item
         return None
 
 
@@ -80,6 +105,9 @@ class LocalLLMSettingsStore:
         raw_response_token_limits = payload.get("response_token_limits", ())
         if not isinstance(raw_response_token_limits, list):
             raw_response_token_limits = ()
+        raw_reasoning_efforts = payload.get("reasoning_efforts", ())
+        if not isinstance(raw_reasoning_efforts, list):
+            raw_reasoning_efforts = ()
         response_token_limits = tuple(
             LocalLLMResponseTokenLimit(
                 base_url=str(item.get("base_url", "")),
@@ -87,6 +115,11 @@ class LocalLLMSettingsStore:
                 max_tokens=item.get("max_tokens", 0),
             )
             for item in raw_response_token_limits
+            if isinstance(item, dict)
+        )
+        reasoning_efforts = tuple(
+            _reasoning_effort_from_payload(item)
+            for item in raw_reasoning_efforts
             if isinstance(item, dict)
         )
         try:
@@ -99,6 +132,7 @@ class LocalLLMSettingsStore:
                 model=model,
                 recent_base_urls=tuple(str(value) for value in raw_recent_urls),
                 response_token_limits=response_token_limits,
+                reasoning_efforts=reasoning_efforts,
             )
         )
 
@@ -116,6 +150,16 @@ class LocalLLMSettingsStore:
                 {"base_url": item.base_url, "model": item.model, "max_tokens": item.max_tokens}
                 for item in sanitized.response_token_limits
             ]
+        if sanitized.reasoning_efforts:
+            payload["reasoning_efforts"] = [
+                {
+                    "base_url": item.base_url,
+                    "model": item.model,
+                    "supported_efforts": list(item.supported_efforts),
+                    "auto_lower_on_length": item.auto_lower_on_length,
+                }
+                for item in sanitized.reasoning_efforts
+            ]
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2)
             + "\n",
@@ -123,6 +167,23 @@ class LocalLLMSettingsStore:
         )
         temporary.replace(self.path)
         return sanitized
+
+
+def _reasoning_effort_from_payload(item: dict[object, object]) -> LocalLLMReasoningEffort:
+    """Read current settings and the short-lived first-version schema."""
+
+    raw_supported = item.get("supported_efforts")
+    if not isinstance(raw_supported, (list, tuple)):
+        # ``effort: medium`` meant only that one short probe was accepted.
+        # Preserve that information but leave automatic lowering off until a
+        # fresh connection check verifies the lower level too.
+        raw_supported = ("medium",) if item.get("effort") == "medium" else ()
+    return LocalLLMReasoningEffort(
+        base_url=str(item.get("base_url", "")),
+        model=str(item.get("model", "")),
+        supported_efforts=tuple(str(value) for value in raw_supported),
+        auto_lower_on_length=bool(item.get("auto_lower_on_length", False)),
+    )
 
 
 def _sanitize_settings(settings: LocalLLMSettings) -> LocalLLMSettings:
@@ -153,11 +214,37 @@ def _sanitize_settings(settings: LocalLLMSettings) -> LocalLLMSettings:
             continue
         seen_pairs.add(pair)
         response_token_limits.append(LocalLLMResponseTokenLimit(normalized_url, model, max_tokens))
+    reasoning_efforts: list[LocalLLMReasoningEffort] = []
+    seen_effort_pairs: set[tuple[str, str]] = set()
+    for item in settings.reasoning_efforts:
+        try:
+            normalized_url = normalize_local_server_url(item.base_url)
+        except LocalLLMError:
+            continue
+        model = item.model.strip()
+        supported_efforts: list[str] = []
+        for value in item.supported_efforts:
+            effort = str(value).strip().lower()
+            if effort in {"medium", "low"} and effort not in supported_efforts:
+                supported_efforts.append(effort)
+        pair = (normalized_url, model)
+        if not model or not supported_efforts or pair in seen_effort_pairs:
+            continue
+        seen_effort_pairs.add(pair)
+        reasoning_efforts.append(
+            LocalLLMReasoningEffort(
+                normalized_url,
+                model,
+                tuple(supported_efforts),
+                bool(item.auto_lower_on_length and supported_efforts),
+            )
+        )
     return LocalLLMSettings(
         base_url=base_url,
         model=settings.model.strip(),
         recent_base_urls=tuple(recent_urls),
         response_token_limits=tuple(response_token_limits),
+        reasoning_efforts=tuple(reasoning_efforts),
     )
 
 

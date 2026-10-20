@@ -34,6 +34,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     stream_events: list[dict[str, object]] = []
     stream_event_batches: list[list[dict[str, object]]] = []
     reject_json_mode = False
+    reject_reasoning_effort = False
     stream_started = Event()
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
@@ -61,6 +62,9 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         type(self).received_body = body
         type(self).received_bodies.append(body)
         if type(self).reject_json_mode and "response_format" in body:
+            self.send_error(400)
+            return
+        if type(self).reject_reasoning_effort and "reasoning_effort" in body:
             self.send_error(400)
             return
         if body.get("stream") and type(self).stream_delay_seconds:
@@ -105,6 +109,7 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         _OpenAICompatibleHandler.stream_events = []
         _OpenAICompatibleHandler.stream_event_batches = []
         _OpenAICompatibleHandler.reject_json_mode = False
+        _OpenAICompatibleHandler.reject_reasoning_effort = False
         _OpenAICompatibleHandler.stream_started.clear()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _OpenAICompatibleHandler)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
@@ -127,6 +132,23 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(result.response_preview, "OK")
         self.assertEqual(_OpenAICompatibleHandler.received_model, "talktracker-test")
         self.assertEqual(_OpenAICompatibleHandler.received_authorization, "Bearer temporary-secret")
+
+    def test_qwen_connection_checks_supported_effort_levels_with_short_requests(self) -> None:
+        result = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).test_connection("Qwen3.8-27B")
+
+        self.assertEqual(result.supported_reasoning_efforts, ("medium", "low"))
+        self.assertEqual([body.get("reasoning_effort") for body in _OpenAICompatibleHandler.received_bodies], [None, "medium", "low"])
+        self.assertEqual(_OpenAICompatibleHandler.received_body["max_tokens"], 8)
+
+    def test_qwen_connection_marks_reasoning_effort_unsupported_when_rejected(self) -> None:
+        _OpenAICompatibleHandler.reject_reasoning_effort = True
+
+        result = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).test_connection("Qwen3.8-27B")
+
+        self.assertEqual(result.supported_reasoning_efforts, ())
+        self.assertEqual(len(_OpenAICompatibleHandler.received_bodies), 2)
+        self.assertNotIn("reasoning_effort", _OpenAICompatibleHandler.received_bodies[0])
+        self.assertEqual(_OpenAICompatibleHandler.received_bodies[1]["reasoning_effort"], "medium")
 
     def test_streamed_completion_accepts_servers_that_return_regular_json(self) -> None:
         content = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
@@ -158,6 +180,32 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(content, "OK")
         self.assertNotIn("response_format", _OpenAICompatibleHandler.received_body)
 
+    def test_reasoning_effort_is_sent_when_requested(self) -> None:
+        OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+            "Qwen3.8-27B",
+            messages=[{"role": "user", "content": "JSON만 답해"}],
+            reasoning_effort="medium",
+        )
+
+        self.assertEqual(_OpenAICompatibleHandler.received_body["reasoning_effort"], "medium")
+
+    def test_reasoning_effort_falls_back_for_older_servers(self) -> None:
+        _OpenAICompatibleHandler.reject_reasoning_effort = True
+        fallbacks: list[bool] = []
+
+        content = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+            "Qwen3.8-27B",
+            messages=[{"role": "user", "content": "JSON만 답해"}],
+            reasoning_effort="medium",
+            on_reasoning_effort_fallback=lambda: fallbacks.append(True),
+        )
+
+        self.assertEqual(content, "OK")
+        self.assertEqual(fallbacks, [True])
+        self.assertEqual(len(_OpenAICompatibleHandler.received_bodies), 2)
+        self.assertEqual(_OpenAICompatibleHandler.received_bodies[0]["reasoning_effort"], "medium")
+        self.assertNotIn("reasoning_effort", _OpenAICompatibleHandler.received_bodies[1])
+
     def test_length_limited_completion_retries_once_with_a_larger_budget(self) -> None:
         _OpenAICompatibleHandler.stream_event_batches = [
             [{"choices": [{"delta": {"content": "{\"segments\": ["}, "finish_reason": "length"}]}]
@@ -175,9 +223,32 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         )
 
         self.assertEqual(content, "OK")
-        self.assertEqual(retries, [(1_024, 4_096)])
-        self.assertEqual(learned_limits, [4_096])
-        self.assertEqual([body["max_tokens"] for body in _OpenAICompatibleHandler.received_bodies], [1_024, 4_096])
+        self.assertEqual(retries, [(1_024, 2_048)])
+        self.assertEqual(learned_limits, [2_048])
+        self.assertEqual([body["max_tokens"] for body in _OpenAICompatibleHandler.received_bodies], [1_024, 2_048])
+
+    def test_length_retry_expands_the_budget_before_lowering_reasoning_effort(self) -> None:
+        _OpenAICompatibleHandler.stream_event_batches = [
+            [{"choices": [{"delta": {"content": "{"}, "finish_reason": "length"}]}],
+            [{"choices": [{"delta": {"content": "{"}, "finish_reason": "length"}]}],
+            [{"choices": [{"delta": {"content": "OK"}, "finish_reason": "stop"}]}],
+        ]
+        lowered: list[str] = []
+
+        content = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+            "Qwen3.8-27B",
+            messages=[{"role": "user", "content": "JSON만 답해"}],
+            max_tokens=1_024,
+            retry_on_length=True,
+            reasoning_effort="medium",
+            reasoning_effort_retry_levels=("low",),
+            on_reasoning_effort_lowered=lowered.append,
+        )
+
+        self.assertEqual(content, "OK")
+        self.assertEqual(lowered, ["low"])
+        self.assertEqual([body["max_tokens"] for body in _OpenAICompatibleHandler.received_bodies], [1_024, 2_048, 2_048])
+        self.assertEqual([body.get("reasoning_effort") for body in _OpenAICompatibleHandler.received_bodies], ["medium", "medium", "low"])
 
     def test_streamed_completion_closes_when_cancelled(self) -> None:
         _OpenAICompatibleHandler.stream_delay_seconds = 1.5
@@ -321,6 +392,28 @@ class LocalLLMSettingsTests(unittest.TestCase):
                 4_096,
             )
 
+    def test_qwen_effort_support_and_opt_in_are_remembered_for_the_verified_server_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings" / "local-llm.json"
+            store = LocalLLMSettingsStore(path)
+            manager = LocalLLMConnectionManager(settings_store=store, client_factory=_FakeClient)
+
+            manager.verify("http://localhost:11434", "temporary-secret", "Qwen3.8-27B")
+
+            capability = manager.snapshot().settings.reasoning_effort_settings_for("http://localhost:11434/v1", "Qwen3.8-27B")
+            self.assertIsNotNone(capability)
+            assert capability is not None
+            self.assertEqual(capability.supported_efforts, ("medium", "low"))
+            self.assertFalse(capability.auto_lower_on_length)
+
+            manager.set_auto_lower_reasoning_effort(True)
+
+            stored = store.load().reasoning_effort_settings_for("http://localhost:11434/v1", "Qwen3.8-27B")
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertTrue(stored.auto_lower_on_length)
+            self.assertNotIn("temporary-secret", path.read_text(encoding="utf-8"))
+
 
 class LocalLLMDisplayErrorTests(unittest.TestCase):
     def test_authentication_error_tells_user_how_to_check_a_key(self) -> None:
@@ -346,7 +439,8 @@ class _FakeClient:
     def test_connection(self, model: str):
         from talktracker.core.llm_client import LocalLLMConnectionTest
 
-        return LocalLLMConnectionTest(model=model, response_preview="OK")
+        efforts = ("medium", "low") if model.casefold().startswith("qwen") else ()
+        return LocalLLMConnectionTest(model=model, response_preview="OK", supported_reasoning_efforts=efforts)
 
 
 class _FailingClient(_FakeClient):

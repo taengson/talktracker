@@ -8,7 +8,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Callable
 
 from .llm_client import LocalLLMCancelled, LocalLLMConnection, LocalLLMConnectionTest, LocalLLMError, LocalLLMModel, OpenAICompatibleLocalClient
-from .llm_config import LocalLLMResponseTokenLimit, LocalLLMSettings, LocalLLMSettingsStore
+from .llm_config import LocalLLMReasoningEffort, LocalLLMResponseTokenLimit, LocalLLMSettings, LocalLLMSettingsStore
 from .refinement import AIRefinementRequest, AIRefinementResult, RefinementCancelled, RefinementError, TranscriptRefiner
 
 if TYPE_CHECKING:
@@ -63,12 +63,35 @@ class LocalLLMConnectionManager:
         with self._lock:
             recent_base_urls = self._settings.recent_base_urls
             response_token_limits = self._settings.response_token_limits
+            previous_reasoning_settings = self._settings.reasoning_effort_settings_for(connection.base_url, result.model)
+            reasoning_efforts = tuple(
+                item
+                for item in self._settings.reasoning_efforts
+                if (item.base_url, item.model) != (connection.base_url, result.model)
+            )
+        # A repeated connection check retains the user's explicit opt-in only
+        # while the same pair still confirms both the initial and fallback
+        # effort levels required for automatic adjustment.
+        reasoning_efforts = (
+            LocalLLMReasoningEffort(
+                connection.base_url,
+                result.model,
+                result.supported_reasoning_efforts,
+                bool(
+                    previous_reasoning_settings
+                    and previous_reasoning_settings.auto_lower_on_length
+                    and _supports_automatic_reasoning_adjustment(result.supported_reasoning_efforts)
+                ),
+            ),
+            *reasoning_efforts,
+        )
         settings = self._store.save(
             LocalLLMSettings(
                 base_url=connection.base_url,
                 model=result.model,
                 recent_base_urls=recent_base_urls,
                 response_token_limits=response_token_limits,
+                reasoning_efforts=reasoning_efforts,
             )
         )
         with self._lock:
@@ -124,6 +147,72 @@ class LocalLLMConnectionManager:
                         model=current.model,
                         recent_base_urls=current.recent_base_urls,
                         response_token_limits=(learned, *retained_limits),
+                        reasoning_efforts=current.reasoning_efforts,
+                    )
+                )
+            except OSError:
+                return
+            self._settings = settings
+
+    def set_auto_lower_reasoning_effort(self, enabled: bool) -> LocalLLMReasoningEffort:
+        """Persist the user's opt-in for a connection that verified support."""
+
+        with self._lock:
+            current = self._settings
+            current_capability = current.reasoning_effort_settings_for(current.base_url, current.model)
+            if not current_capability or not _supports_automatic_reasoning_adjustment(current_capability.supported_efforts):
+                raise LocalLLMError("이 서버와 모델에서는 추론 강도 자동 조정을 확인하지 못했습니다. 연결 확인을 다시 해주세요.")
+            if current_capability.auto_lower_on_length == bool(enabled):
+                return current_capability
+            retained = tuple(
+                item
+                for item in current.reasoning_efforts
+                if (item.base_url, item.model) != (current.base_url, current.model)
+            )
+            updated = LocalLLMReasoningEffort(
+                current.base_url,
+                current.model,
+                current_capability.supported_efforts,
+                bool(enabled),
+            )
+            try:
+                settings = self._store.save(
+                    LocalLLMSettings(
+                        base_url=current.base_url,
+                        model=current.model,
+                        recent_base_urls=current.recent_base_urls,
+                        response_token_limits=current.response_token_limits,
+                        reasoning_efforts=(updated, *retained),
+                    )
+                )
+            except OSError as error:
+                raise LocalLLMError("추론 강도 자동 조정 설정을 저장하지 못했습니다.") from error
+            self._settings = settings
+            return updated
+
+    def disable_reasoning_effort(self, *, base_url: str | None = None, model: str | None = None) -> None:
+        """Stop using a capability when the running server rejects it later."""
+
+        with self._lock:
+            current = self._settings
+            target_base_url = (base_url or current.base_url).strip()
+            target_model = (model or current.model).strip()
+            if not target_base_url or not target_model:
+                return
+            retained = tuple(
+                item
+                for item in current.reasoning_efforts
+                if (item.base_url, item.model) != (target_base_url, target_model)
+            )
+            disabled = LocalLLMReasoningEffort(target_base_url, target_model)
+            try:
+                settings = self._store.save(
+                    LocalLLMSettings(
+                        base_url=current.base_url,
+                        model=current.model,
+                        recent_base_urls=current.recent_base_urls,
+                        response_token_limits=current.response_token_limits,
+                        reasoning_efforts=(disabled, *retained),
                     )
                 )
             except OSError:
@@ -240,13 +329,39 @@ class AIRefinementManager:
             else:
                 client = None
             refiner = TranscriptRefiner(client)
+            reasoning_settings = settings.reasoning_effort_settings_for(settings.base_url, settings.model)
+            reasoning_supported = bool(
+                reasoning_settings
+                and _supports_automatic_reasoning_adjustment(reasoning_settings.supported_efforts)
+            )
+            automatic_effort_enabled = bool(
+                reasoning_supported
+                and reasoning_settings
+                and reasoning_settings.auto_lower_on_length
+            )
+            # A verified reasoning-capable model starts at the moderate level.
+            # The user's opt-in controls only whether a length-limited request
+            # may step down to ``low``; it must not silently restore the
+            # server's potentially much stronger default level.
+            initial_reasoning_effort = "medium" if reasoning_supported else None
+            fallback_reasoning_efforts = (
+                tuple(effort for effort in reasoning_settings.supported_efforts if effort != "medium")
+                if automatic_effort_enabled and reasoning_settings
+                else ()
+            )
             result = refiner.refine(
                 analysis,
                 request,
                 model=settings.model,
                 response_token_limit=settings.response_token_limit_for(settings.base_url, settings.model),
+                reasoning_effort=initial_reasoning_effort,
+                reasoning_effort_fallback_levels=fallback_reasoning_efforts,
                 on_length_retry_success=lambda max_tokens: self._connection_manager.remember_response_token_limit(
                     max_tokens,
+                    base_url=settings.base_url,
+                    model=settings.model,
+                ),
+                on_reasoning_effort_fallback=lambda: self._connection_manager.disable_reasoning_effort(
                     base_url=settings.base_url,
                     model=settings.model,
                 ),
@@ -269,7 +384,6 @@ class AIRefinementManager:
         finally:
             if acquired:
                 self._execution_lock.release()
-
     def _update_progress(self, message: str) -> None:
         with self._lock:
             if not self._state.active:
@@ -300,3 +414,7 @@ class AIRefinementManager:
                 error=error,
                 owner_id=owner_id,
             )
+
+
+def _supports_automatic_reasoning_adjustment(efforts: tuple[str, ...]) -> bool:
+    return {"medium", "low"}.issubset(efforts)

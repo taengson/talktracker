@@ -28,6 +28,10 @@ class LocalLLMResponseError(LocalLLMError):
     """Raised when a server response is not an OpenAI-compatible payload."""
 
 
+class LocalLLMResponseLengthError(LocalLLMResponseError):
+    """Raised after a completion exhausts its bounded output retry budget."""
+
+
 class LocalLLMHTTPError(LocalLLMError):
     """Raised for a failed request without exposing request credentials."""
 
@@ -75,6 +79,7 @@ class LocalLLMConnectionTest:
 
     model: str
     response_preview: str
+    supported_reasoning_efforts: tuple[str, ...] = ()
 
 
 def normalize_local_server_url(value: str) -> str:
@@ -133,21 +138,17 @@ class OpenAICompatibleLocalClient:
         model = model.strip()
         if not model:
             raise LocalLLMError("연결을 확인할 모델 ID를 입력하거나 선택해 주세요.")
-        payload = self._request_json(
-            "POST",
-            "chat/completions",
-            body={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You are a local connection check. Reply with only OK."},
-                    {"role": "user", "content": "Reply with OK."},
-                ],
-                "temperature": 0,
-                "max_tokens": 8,
-                "stream": False,
-            },
-            timeout_seconds=max(self.timeout_seconds, 120.0),
-        )
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a local connection check. Reply with only OK."},
+                {"role": "user", "content": "Reply with OK."},
+            ],
+            "temperature": 0,
+            "max_tokens": 8,
+            "stream": False,
+        }
+        payload = self._request_json("POST", "chat/completions", body=body, timeout_seconds=max(self.timeout_seconds, 120.0))
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise LocalLLMResponseError("연결 확인 응답에 생성 결과가 없습니다.")
@@ -158,9 +159,28 @@ class OpenAICompatibleLocalClient:
         if not isinstance(message, dict):
             raise LocalLLMResponseError("연결 확인 응답에 메시지가 없습니다.")
         content = str(message.get("content", "")).strip()
+        # The field is not a portable OpenAI Chat Completions feature.  Only
+        # probe profiles whose local serving contract currently documents the
+        # flat field, and keep the request short enough to avoid treating this
+        # as part of the user's transcript work.
+        supported_reasoning_efforts: list[str] = []
+        for effort in _reasoning_effort_probe_levels(model):
+            probe = dict(body, reasoning_effort=effort)
+            try:
+                self._request_json("POST", "chat/completions", body=probe, timeout_seconds=max(self.timeout_seconds, 120.0))
+            except LocalLLMHTTPError as error:
+                if error.status_code in {400, 422}:
+                    break
+                raise
+            else:
+                supported_reasoning_efforts.append(effort)
         # Some reasoning models finish a tiny request without visible content.
         # A structurally valid completion is still proof that the selected model ran.
-        return LocalLLMConnectionTest(model=model, response_preview=content[:160])
+        return LocalLLMConnectionTest(
+            model=model,
+            response_preview=content[:160],
+            supported_reasoning_efforts=tuple(supported_reasoning_efforts),
+        )
 
     def create_chat_completion(
         self,
@@ -170,11 +190,16 @@ class OpenAICompatibleLocalClient:
         temperature: float = 0,
         max_tokens: int = 1_024,
         json_mode: bool = False,
+        reasoning_effort: str | None = None,
+        reasoning_effort_retry_levels: tuple[str, ...] = (),
         retry_on_length: bool = False,
         on_length_retry: Callable[[int, int], None] | None = None,
         on_length_retry_success: Callable[[int], None] | None = None,
+        on_reasoning_effort_fallback: Callable[[], None] | None = None,
+        on_reasoning_effort_lowered: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         _length_retry_attempted: bool = False,
+        _remaining_reasoning_effort_levels: tuple[str, ...] | None = None,
     ) -> str:
         """Return a streamed text completion and close it when cancelled.
 
@@ -193,6 +218,10 @@ class OpenAICompatibleLocalClient:
         if not messages:
             raise LocalLLMError("AI 정리에 보낼 대화 내용을 찾지 못했습니다.")
         requested_tokens = max(1, int(max_tokens))
+        if _remaining_reasoning_effort_levels is None:
+            remaining_reasoning_effort_levels = _normalize_reasoning_effort_levels(reasoning_effort_retry_levels)
+        else:
+            remaining_reasoning_effort_levels = _remaining_reasoning_effort_levels
         body = {
             "model": model,
             "messages": messages,
@@ -205,16 +234,40 @@ class OpenAICompatibleLocalClient:
             # model's output contract explicit instead of relying only on a
             # natural-language prompt.
             body["response_format"] = {"type": "json_object"}
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         try:
             response = self._open_completion_response(body)
         except LocalLLMHTTPError as error:
-            if not json_mode or error.status_code not in {400, 422}:
+            if error.status_code not in {400, 422} or not (json_mode or reasoning_effort):
                 raise
-            # A few otherwise compatible local servers reject the standard
-            # response_format field.  Retry once without it so those servers
-            # retain the existing prompt-only JSON behaviour.
-            fallback_body = {key: value for key, value in body.items() if key != "response_format"}
-            response = self._open_completion_response(fallback_body)
+            fallback_body = dict(body)
+            if json_mode:
+                # A few otherwise compatible local servers reject the standard
+                # response_format field.  Retry without it so those servers
+                # retain the prompt-only JSON behaviour.
+                fallback_body.pop("response_format", None)
+                try:
+                    response = self._open_completion_response(fallback_body)
+                except LocalLLMHTTPError as fallback_error:
+                    if not reasoning_effort or fallback_error.status_code not in {400, 422}:
+                        raise
+                    error = fallback_error
+                else:
+                    error = None
+            if error is not None:
+                if not reasoning_effort:
+                    raise error
+                # ``reasoning_effort`` is used by current Qwen services but is
+                # not implemented by every OpenAI-compatible local server.
+                # Keep the user's work moving on those servers by falling back
+                # to the same prompt without this optional instruction.
+                fallback_body.pop("reasoning_effort", None)
+                response = self._open_completion_response(fallback_body)
+                reasoning_effort = None
+                remaining_reasoning_effort_levels = ()
+                if on_reasoning_effort_fallback:
+                    on_reasoning_effort_fallback()
 
         done = Event()
 
@@ -282,7 +335,7 @@ class OpenAICompatibleLocalClient:
         reached_length_limit = bool({"length", "max_tokens"} & finish_reasons)
         if reached_length_limit:
             retry_tokens = _expanded_token_limit(requested_tokens)
-            if retry_on_length and retry_tokens > requested_tokens:
+            if retry_on_length and not _length_retry_attempted and retry_tokens > requested_tokens:
                 if on_length_retry:
                     on_length_retry(requested_tokens, retry_tokens)
                 content = self.create_chat_completion(
@@ -291,16 +344,45 @@ class OpenAICompatibleLocalClient:
                     temperature=temperature,
                     max_tokens=retry_tokens,
                     json_mode=json_mode,
-                    retry_on_length=False,
+                    reasoning_effort=reasoning_effort,
+                    reasoning_effort_retry_levels=reasoning_effort_retry_levels,
+                    retry_on_length=True,
                     on_length_retry=on_length_retry,
                     on_length_retry_success=on_length_retry_success,
+                    on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                    on_reasoning_effort_lowered=on_reasoning_effort_lowered,
                     should_cancel=should_cancel,
                     _length_retry_attempted=True,
+                    _remaining_reasoning_effort_levels=remaining_reasoning_effort_levels,
                 )
                 if on_length_retry_success:
                     on_length_retry_success(retry_tokens)
                 return content
-            raise LocalLLMResponseError(_length_limit_message(_length_retry_attempted))
+            if retry_on_length and remaining_reasoning_effort_levels:
+                next_effort = remaining_reasoning_effort_levels[0]
+                if on_reasoning_effort_lowered:
+                    on_reasoning_effort_lowered(next_effort)
+                return self.create_chat_completion(
+                    model,
+                    messages=messages,
+                    temperature=temperature,
+                    # Keep the larger budget that already proved necessary.
+                    # Lowering reasoning strength is the final bounded retry,
+                    # not a new cycle that starts from the small limit again.
+                    max_tokens=requested_tokens,
+                    json_mode=json_mode,
+                    reasoning_effort=next_effort,
+                    reasoning_effort_retry_levels=reasoning_effort_retry_levels,
+                    retry_on_length=True,
+                    on_length_retry=on_length_retry,
+                    on_length_retry_success=on_length_retry_success,
+                    on_reasoning_effort_fallback=on_reasoning_effort_fallback,
+                    on_reasoning_effort_lowered=on_reasoning_effort_lowered,
+                    should_cancel=should_cancel,
+                    _length_retry_attempted=True,
+                    _remaining_reasoning_effort_levels=remaining_reasoning_effort_levels[1:],
+                )
+            raise LocalLLMResponseLengthError(_length_limit_message(_length_retry_attempted))
         if not content:
             raise LocalLLMResponseError(_empty_completion_message(saw_reasoning, finish_reasons))
         return content
@@ -439,7 +521,28 @@ def _empty_completion_message(saw_reasoning: bool, finish_reasons: set[str]) -> 
 def _expanded_token_limit(current_limit: int) -> int:
     """Return one bounded retry budget after an incomplete completion."""
 
-    return min(16_384, max(4_096, current_limit * 4))
+    # Transcript work is now bounded by utterance chunks.  A modest retry is
+    # enough for one chunk and avoids a slow, oversized second generation.
+    return min(4_096, max(1_024, current_limit * 2))
+
+
+def _is_qwen_model(model: str) -> bool:
+    return model.strip().casefold().startswith("qwen")
+
+
+def _reasoning_effort_probe_levels(model: str) -> tuple[str, ...]:
+    """Return the non-portable local profile we can safely probe today."""
+
+    return ("medium", "low") if _is_qwen_model(model) else ()
+
+
+def _normalize_reasoning_effort_levels(levels: tuple[str, ...]) -> tuple[str, ...]:
+    supported: list[str] = []
+    for value in levels:
+        effort = value.strip().lower()
+        if effort in {"medium", "low"} and effort not in supported:
+            supported.append(effort)
+    return tuple(supported)
 
 
 def _length_limit_message(retry_attempted: bool) -> str:

@@ -464,11 +464,22 @@ class TalkTrackerApp(tk.Tk):
         dialog.resizable(False, False)
         dialog.configure(bg=self.GROUND)
         dialog.transient(self)
-        self._center_dialog_over_app(dialog, 610, 510)
+        self._center_dialog_over_app(dialog, 610, 600)
 
         url_value = tk.StringVar(value=saved.base_url or "http://127.0.0.1:8000")
         api_key_value = tk.StringVar()
         model_value = tk.StringVar(value=saved.model)
+        saved_reasoning = saved.reasoning_effort_settings_for(saved.base_url, saved.model)
+        auto_lower_reasoning_value = tk.BooleanVar(
+            value=bool(saved_reasoning and saved_reasoning.auto_lower_on_length)
+        )
+        reasoning_hint_value = tk.StringVar(
+            value=(
+                "이전에 확인한 추론 강도 설정입니다. 연결 확인 뒤 현재 서버에서도 지원되는지 다시 확인합니다."
+                if saved_reasoning and saved_reasoning.supported_efforts
+                else "연결 확인 뒤 이 서버·모델에서 지원되는지 표시합니다. 기본값은 꺼짐입니다."
+            )
+        )
         status_value = tk.StringVar(
             value=(
                 "같은 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다."
@@ -655,6 +666,63 @@ class TalkTrackerApp(tk.Tk):
         )
         status_label.pack(fill="x", padx=24, pady=(0, 12))
 
+        reasoning_area = tk.Frame(dialog, bg=self.GROUND)
+        reasoning_area.pack(fill="x", padx=24, pady=(0, 12))
+        reasoning_supported = False
+
+        def change_auto_lower_reasoning() -> None:
+            try:
+                updated = self.llm_connection_manager.set_auto_lower_reasoning_effort(auto_lower_reasoning_value.get())
+            except LocalLLMError as error:
+                auto_lower_reasoning_value.set(False)
+                reasoning_hint_value.set(str(error))
+                return
+            if updated.auto_lower_on_length:
+                reasoning_hint_value.set("중간 추론 강도로 시작하고, 응답 길이 한도에 도달하면 낮은 강도로 다시 시도합니다.")
+            else:
+                reasoning_hint_value.set("중간 추론 강도로 시작합니다. 응답 길이 한도에 도달해도 추론 강도는 낮추지 않습니다.")
+
+        auto_lower_check = tk.Checkbutton(
+            reasoning_area,
+            text="추론 강도 자동 조정",
+            variable=auto_lower_reasoning_value,
+            command=change_auto_lower_reasoning,
+            state="disabled",
+            bg=self.GROUND,
+            fg=self.INK,
+            activebackground=self.GROUND,
+            activeforeground=self.INK,
+            selectcolor=self.PAPER,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        auto_lower_check.pack(anchor="w")
+        tk.Label(
+            reasoning_area,
+            textvariable=reasoning_hint_value,
+            bg=self.GROUND,
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            justify="left",
+            wraplength=555,
+        ).pack(anchor="w", padx=(25, 0), pady=(2, 0))
+
+        def set_reasoning_support(levels: tuple[str, ...], *, verified: bool) -> None:
+            nonlocal reasoning_supported
+            reasoning_supported = bool(verified and {"medium", "low"}.issubset(levels))
+            auto_lower_check.configure(state="normal" if reasoning_supported and not self.llm_connection_operation_active else "disabled")
+            if reasoning_supported:
+                current_settings = self.llm_connection_manager.snapshot().settings
+                current_capability = current_settings.reasoning_effort_settings_for(current_settings.base_url, current_settings.model)
+                auto_lower_reasoning_value.set(bool(current_capability and current_capability.auto_lower_on_length))
+                reasoning_hint_value.set(
+                    "지원 확인됨: 항상 중간 강도로 시작합니다. 켜면 응답 길이 한도에서 낮은 강도로 조정합니다. 기본값은 꺼짐입니다."
+                )
+            else:
+                auto_lower_reasoning_value.set(False)
+                reasoning_hint_value.set("이 서버·모델에서는 추론 강도 자동 조정을 확인하지 못했습니다. 기본 응답 길이 재시도만 사용합니다.")
+
         actions = tk.Frame(dialog, bg=self.GROUND)
         actions.pack(fill="x", padx=24, pady=(0, 22))
         actions.grid_columnconfigure(0, weight=1)
@@ -677,6 +745,7 @@ class TalkTrackerApp(tk.Tk):
             api_key_toggle.configure(state=state)
             model_entry.configure(state=state)
             model_options_button.configure(state=state)
+            auto_lower_check.configure(state="disabled" if value or not reasoning_supported else "normal")
 
         def start_operation(operation: str) -> None:
             if self.llm_connection_operation_active:
@@ -736,7 +805,14 @@ class TalkTrackerApp(tk.Tk):
                     elif event == "verified":
                         preview = getattr(payload, "response_preview", "")
                         suffix = f" 응답: {preview}" if preview else ""
-                        status_value.set(f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.{suffix}")
+                        levels = tuple(getattr(payload, "supported_reasoning_efforts", ()))
+                        set_reasoning_support(levels, verified=True)
+                        reasoning = (
+                            " 추론 강도 자동 조정도 지원됩니다."
+                            if {"medium", "low"}.issubset(levels)
+                            else " 추론 강도 자동 조정은 이 서버·모델에서 사용할 수 없습니다."
+                        )
+                        status_value.set(f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.{reasoning}{suffix}")
                         status_label.configure(bg="#E8F6F0", fg=self.SUCCESS)
                         self.refresh_llm_connection_status()
                     else:
