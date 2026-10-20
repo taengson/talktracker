@@ -159,6 +159,21 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(content, "OK")
         self.assertEqual(_OpenAICompatibleHandler.received_model, "talktracker-test")
 
+    def test_attachment_style_completion_omits_max_tokens_and_keeps_partial_text(self) -> None:
+        _OpenAICompatibleHandler.stream_events = [
+            {"choices": [{"delta": {"content": "자유 형식 결과"}, "finish_reason": "length"}]},
+        ]
+
+        content = OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+            "talktracker-test",
+            messages=[{"role": "user", "content": "[첨부 파일: 전사문.md]"}],
+            max_tokens=None,
+            retry_on_length=False,
+        )
+
+        self.assertEqual(content, "자유 형식 결과")
+        self.assertNotIn("max_tokens", _OpenAICompatibleHandler.received_body)
+
     def test_json_mode_uses_the_standard_response_format(self) -> None:
         OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
             "talktracker-test",

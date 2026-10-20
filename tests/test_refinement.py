@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from talktracker.core.analysis import AnalysisResult, Utterance
+from talktracker.core.attachment_content import MAX_ATTACHMENT_FILE_BYTES
 from talktracker.core.llm_client import LocalLLMResponseLengthError
 from talktracker.core.llm_config import LocalLLMReasoningEffort, LocalLLMSettings
 from talktracker.core.refinement import (
@@ -20,7 +21,9 @@ from talktracker.core.refinement import (
     render_original_conversation,
     render_refined_conversation,
     render_result_documents,
+    render_result_summary,
     render_summary,
+    _temporary_transcript_document,
 )
 from talktracker.core.workflow import AIRefinementManager
 
@@ -127,6 +130,19 @@ class _ChunkingFakeClient:
         )
 
 
+class _DocumentFakeClient:
+    """Returns ordinary Markdown, like a user-facing chat model."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def create_chat_completion(self, model: str, *, messages, **kwargs) -> str:
+        self.requests.append({"model": model, "messages": messages, **kwargs})
+        if "회의 요약" in messages[0]["content"]:
+            return "## 개요\n\n초안 준비와 일정 확인을 논의했습니다.\n\n## 핵심 내용\n\n- 다음 주까지 초안을 준비합니다."
+        return "(손태영)  00:01 – 00:05\n네, 다음 주까지 초안을 준비할게요.\n\n(화자 2)  00:05 – 00:09\n좋습니다. 일정을 확인해 주세요."
+
+
 class _RepartitioningFakeClient:
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
@@ -215,6 +231,87 @@ def _analysis() -> AnalysisResult:
 
 
 class TranscriptRefinerTests(unittest.TestCase):
+    def test_normal_transcript_uses_a_plain_document_request_and_keeps_markdown_output(self) -> None:
+        client = _DocumentFakeClient()
+        request = AIRefinementRequest(
+            selection=ResultSelection(refined=True, summary=True),
+            background="주간 프로젝트 회의",
+            speaker_guides=(SpeakerGuide("화자 1", display_name="손태영"),),
+        )
+
+        result = TranscriptRefiner(client).refine(_analysis(), request, model="local-model")
+
+        self.assertEqual(len(client.requests), 2)
+        self.assertTrue(all(request["json_mode"] is False for request in client.requests))
+        self.assertTrue(all(request["max_tokens"] is None for request in client.requests))
+        self.assertTrue(all(request["retry_on_length"] is False for request in client.requests))
+        self.assertTrue(all(request["reasoning_effort_retry_levels"] == () for request in client.requests))
+        self.assertTrue(all(len(request["messages"]) == 1 for request in client.requests))
+        self.assertTrue(all("[첨부 파일:" in request["messages"][0]["content"] for request in client.requests))
+        self.assertTrue(all("[첨부 파일 끝]" in request["messages"][0]["content"] for request in client.requests))
+        self.assertTrue(all("[사용자 요청]" in request["messages"][0]["content"] for request in client.requests))
+        self.assertTrue(all("네 다음주 까지 초안 준비 할게요" in request["messages"][0]["content"] for request in client.requests))
+        self.assertEqual(result.refined_text_by_segment_id, {})
+        self.assertIn("다음 주까지 초안을 준비할게요.", render_refined_conversation(_analysis(), result))
+        self.assertIn("초안 준비와 일정 확인", render_result_summary(result))
+        documents = render_result_documents(_analysis(), result)
+        self.assertIn("## 개요", documents["summary"])
+        self.assertIn("(손태영)", documents["refined"])
+        self.assertIn("네 다음주 까지 초안 준비 할게요", render_original_conversation(_analysis()))
+
+    def test_temporary_transcript_document_is_removed_after_success_and_error(self) -> None:
+        with _temporary_transcript_document("임시 전사") as path:
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.read_text(encoding="utf-8"), "임시 전사")
+        self.assertFalse(path.exists())
+
+        failed_path = None
+        with self.assertRaisesRegex(RuntimeError, "중단"):
+            with _temporary_transcript_document("중단된 전사") as path:
+                failed_path = path
+                raise RuntimeError("중단")
+        assert failed_path is not None
+        self.assertFalse(failed_path.exists())
+
+    def test_agent_chat_file_limit_is_checked_before_a_model_request(self) -> None:
+        client = _DocumentFakeClient()
+        analysis = AnalysisResult(
+            source_name="too-large.m4a",
+            duration=1,
+            speaker_segments=[],
+            utterances=[Utterance(0, 1, "화자 1", "가" * (MAX_ATTACHMENT_FILE_BYTES // 3))],
+            whisper_profile="빠른 전사",
+        )
+
+        with self.assertRaisesRegex(RefinementError, "5MiB"):
+            TranscriptRefiner(client).refine(
+                analysis,
+                AIRefinementRequest(selection=ResultSelection(summary=True)),
+                model="local-model",
+            )
+        self.assertEqual(client.requests, [])
+
+    def test_18_kib_korean_transcript_uses_the_document_request_path(self) -> None:
+        client = _DocumentFakeClient()
+        analysis = AnalysisResult(
+            source_name="18kb.m4a",
+            duration=60,
+            speaker_segments=[],
+            utterances=[Utterance(0, 60, "화자 1", "가" * 6_000)],
+            whisper_profile="빠른 전사",
+        )
+
+        result = TranscriptRefiner(client).refine(
+            analysis,
+            AIRefinementRequest(selection=ResultSelection(summary=True)),
+            model="local-model",
+        )
+
+        self.assertEqual(len(client.requests), 1)
+        self.assertFalse(client.requests[0]["json_mode"])
+        self.assertIn("가" * 6_000, client.requests[0]["messages"][0]["content"])
+        self.assertIn("초안 준비와 일정 확인", render_result_summary(result))
+
     def test_refinement_keeps_original_speaker_time_and_order(self) -> None:
         client = _FakeClient(
             {
@@ -237,7 +334,7 @@ class TranscriptRefinerTests(unittest.TestCase):
             speaker_guides=(SpeakerGuide("화자 1", guidance="프로젝트 매니저", display_name="손태영"),),
         )
 
-        result = TranscriptRefiner(client).refine(_analysis(), request, model="local-model")
+        result = TranscriptRefiner(client, document_first=False).refine(_analysis(), request, model="local-model")
 
         original = render_original_conversation(_analysis())
         refined = render_refined_conversation(_analysis(), result)
@@ -275,7 +372,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         )
         progress: list[str] = []
 
-        TranscriptRefiner(client).refine(
+        TranscriptRefiner(client, document_first=False).refine(
             _analysis(),
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="local-model",
@@ -297,7 +394,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         )
         progress: list[str] = []
 
-        TranscriptRefiner(client).refine(
+        TranscriptRefiner(client, document_first=False).refine(
             _analysis(),
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="Qwen3.8-27B",
@@ -312,7 +409,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
         self.assertIn("중간 추론 강도", progress[0])
 
-    def test_verified_reasoning_model_starts_at_medium_when_auto_adjustment_is_off(self) -> None:
+    def test_attachment_policy_uses_auto_reasoning_even_for_a_verified_reasoning_model(self) -> None:
         client = _FakeClient(
             {
                 "segments": [
@@ -329,7 +426,7 @@ class TranscriptRefinerTests(unittest.TestCase):
 
         self.assertEqual(manager.snapshot().state, "completed")
         assert client.request is not None
-        self.assertEqual(client.request["reasoning_effort"], "medium")
+        self.assertIsNone(client.request["reasoning_effort"])
         self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
 
     def test_long_transcript_is_chunked_and_its_results_are_merged(self) -> None:
@@ -346,7 +443,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         )
         progress: list[str] = []
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             analysis,
             AIRefinementRequest(selection=ResultSelection(refined=True, summary=True)),
             model="local-model",
@@ -379,7 +476,7 @@ class TranscriptRefinerTests(unittest.TestCase):
             whisper_profile="빠른 전사",
         )
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             analysis,
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="local-model",
@@ -405,7 +502,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         )
         progress: list[str] = []
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             analysis,
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="local-model",
@@ -427,7 +524,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         )
         progress: list[str] = []
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             analysis,
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="local-model",
@@ -448,7 +545,7 @@ class TranscriptRefinerTests(unittest.TestCase):
             whisper_profile="빠른 전사",
         )
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             analysis,
             AIRefinementRequest(selection=ResultSelection(summary=True)),
             model="local-model",
@@ -490,7 +587,7 @@ class TranscriptRefinerTests(unittest.TestCase):
             }
         )
 
-        result = TranscriptRefiner(client).refine(
+        result = TranscriptRefiner(client, document_first=False).refine(
             _analysis(),
             AIRefinementRequest(selection=ResultSelection(refined=True)),
             model="local-model",
@@ -506,7 +603,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         client = _FakeClient({"segments": [{"segment_id": "unknown", "refined_text": "사용하면 안 됩니다."}]})
 
         with self.assertRaisesRegex(RefinementError, "적용할 수 있는 다듬은 대화 구간"):
-            TranscriptRefiner(client).refine(
+            TranscriptRefiner(client, document_first=False).refine(
                 _analysis(),
                 AIRefinementRequest(
                     selection=ResultSelection(refined=True),

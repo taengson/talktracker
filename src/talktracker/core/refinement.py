@@ -1,24 +1,35 @@
-"""Safe, chunked transcript refinement through an OpenAI-compatible LLM.
+"""Transcript refinement through an OpenAI-compatible LLM.
 
-The original transcription stays immutable.  A model only returns replacement
-text keyed by an internal segment id, so speaker names, timing, and ordering
-continue to come from :mod:`analysis` rather than an LLM response.
+The original transcription always stays immutable.  Production refinement
+uses Agent Chat's attachment policy: write the transcript as a temporary
+document, select the whole document or relevant 16 KiB units, then show the
+model's free-form Markdown response as a separate result document.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
+from .attachment_content import (
+    AttachmentChunk,
+    MAX_ATTACHMENT_CONTENT_BYTES,
+    MAX_ATTACHMENT_FILE_BYTES,
+    create_attachment_chunks,
+    select_attachment_content,
+)
 from .llm_client import LocalLLMError, LocalLLMResponseLengthError, OpenAICompatibleLocalClient
 
 if TYPE_CHECKING:
     from .analysis import AnalysisResult, Utterance
 
 
-PROMPT_VERSION = "2026-10-20.2"
+PROMPT_VERSION = "2026-10-20.4"
 ProgressCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 LengthRetrySuccessCallback = Callable[[int], None]
@@ -104,12 +115,15 @@ class ConversationSummary:
 
 @dataclass(frozen=True)
 class AIRefinementResult:
-    """Non-destructive output of one short-transcript LLM request."""
+    """Non-destructive output of one transcript LLM request."""
 
     selection: ResultSelection
     refined_text_by_segment_id: dict[str, str] = field(default_factory=dict)
+    refined_document: str = ""
     speaker_display_names: dict[str, str] = field(default_factory=dict)
     summary: ConversationSummary | None = None
+    summary_document: str = ""
+    attachment_selection_summary: str = ""
     warnings: tuple[str, ...] = ()
     prompt_version: str = PROMPT_VERSION
     model: str = ""
@@ -131,13 +145,19 @@ def merge_ai_refinement_results(
     refined_requested = previous.selection.refined or latest.selection.refined
     summary_requested = previous.selection.summary or latest.selection.summary
     refined_text = latest.refined_text_by_segment_id if latest.selection.refined else previous.refined_text_by_segment_id
+    refined_document = latest.refined_document if latest.selection.refined else previous.refined_document
     summary = latest.summary if latest.selection.summary else previous.summary
+    summary_document = latest.summary_document if latest.selection.summary else previous.summary_document
+    attachment_selection_summary = latest.attachment_selection_summary or previous.attachment_selection_summary
     warnings = tuple(dict.fromkeys((*previous.warnings, *latest.warnings)))
     return AIRefinementResult(
         selection=ResultSelection(refined=refined_requested, summary=summary_requested),
         refined_text_by_segment_id=refined_text,
+        refined_document=refined_document,
         speaker_display_names={**previous.speaker_display_names, **latest.speaker_display_names},
         summary=summary,
+        summary_document=summary_document,
+        attachment_selection_summary=attachment_selection_summary,
         warnings=warnings,
         prompt_version=latest.prompt_version,
         model=latest.model or previous.model,
@@ -153,10 +173,11 @@ class _Segment:
 
 
 class TranscriptRefiner:
-    """Refine an immutable transcript in small, independently validated chunks."""
+    """Refine an immutable transcript without ever overwriting its source."""
 
-    def __init__(self, client: OpenAICompatibleLocalClient | None) -> None:
+    def __init__(self, client: OpenAICompatibleLocalClient | None, *, document_first: bool = True) -> None:
         self.client = client
+        self.document_first = document_first
 
     def refine(
         self,
@@ -180,6 +201,30 @@ class TranscriptRefiner:
         if not self.client:
             raise RefinementError("로컬 AI 연결을 확인한 뒤 다시 시도해 주세요.")
         self._raise_if_cancelled(should_cancel)
+
+        original_document = render_original_conversation(analysis)
+        if self.document_first:
+            # Keep the generated transcript in a real, short-lived Markdown
+            # file while it is treated as a chat attachment.  The context
+            # manager removes both the file and its private directory after a
+            # normal result, a model error, or cancellation.
+            with _temporary_transcript_document(original_document) as document_path:
+                if document_path.stat().st_size > MAX_ATTACHMENT_FILE_BYTES:
+                    raise RefinementError(
+                        "전사문이 Agent Chat의 첨부 파일 한도(5MiB)를 넘었습니다. "
+                        "원본 전사문은 보존되어 있으니 파일을 나눈 뒤 다시 시도해 주세요."
+                    )
+                attachment_source = document_path.read_text(encoding="utf-8")
+                return self._refine_document_first(
+                    normalized,
+                    attachment_name=_transcript_attachment_name(analysis.source_name),
+                    attachment_source=attachment_source,
+                    attachment_chunks=create_attachment_chunks(attachment_source),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    progress=progress,
+                    should_cancel=should_cancel,
+                )
 
         segments = _segments_for_utterances(analysis.utterances)
         remembered_limit = min(_MAX_CHUNK_RESPONSE_TOKENS, max(0, int(response_token_limit or 0)))
@@ -238,6 +283,152 @@ class TranscriptRefiner:
         if successful_retry_limits and on_length_retry_success:
             on_length_retry_success(successful_retry_limits[-1])
         return result
+
+    def _refine_document_first(
+        self,
+        request: AIRefinementRequest,
+        *,
+        attachment_name: str,
+        attachment_source: str,
+        attachment_chunks: tuple[AttachmentChunk, ...],
+        model: str,
+        reasoning_effort: str | None,
+        progress: ProgressCallback | None,
+        should_cancel: CancelCallback | None,
+    ) -> AIRefinementResult:
+        """Create free-form result documents through the Agent Chat flow."""
+
+        if progress:
+            progress("AI에 전사문을 첨부 문서로 전달하고 있습니다…")
+
+        selection_summaries: list[str] = []
+
+        def messages_for(mode: str) -> list[dict[str, str]]:
+            query = self._document_user_request(request, mode=mode)
+            selection = select_attachment_content(
+                attachment_source,
+                attachment_chunks,
+                query,
+                MAX_ATTACHMENT_CONTENT_BYTES,
+            )
+            if selection.selection_summary:
+                selection_summaries.append(selection.selection_summary)
+            return self._document_messages(
+                attachment_name,
+                selection.content,
+                query,
+            )
+
+        refined_document = ""
+        if request.selection.refined:
+            if progress:
+                progress("AI가 전사문을 다듬은 대화 문서로 만들고 있습니다…")
+            refined_document = self._request_document(
+                model,
+                messages_for("refine"),
+                reasoning_effort=reasoning_effort,
+                should_cancel=should_cancel,
+            )
+
+        summary_document = ""
+        if request.selection.summary:
+            if progress:
+                progress("AI가 전사문 전체를 요약 문서로 만들고 있습니다…")
+            summary_document = self._request_document(
+                model,
+                messages_for("summary"),
+                reasoning_effort=reasoning_effort,
+                should_cancel=should_cancel,
+            )
+
+        if progress:
+            progress("AI가 만든 문서를 저장하고 있습니다…")
+        return AIRefinementResult(
+            selection=request.selection,
+            refined_document=refined_document,
+            speaker_display_names={
+                guide.speaker: guide.display_name for guide in request.speaker_guides if guide.display_name
+            },
+            summary_document=summary_document,
+            attachment_selection_summary=" · ".join(dict.fromkeys(selection_summaries)),
+            model=model.strip(),
+        )
+
+    @staticmethod
+    def _document_user_request(request: AIRefinementRequest, *, mode: str) -> str:
+        """Build the text used as Agent Chat's user request for this file."""
+
+        speaker_guides = "\n".join(
+            "- {}{}{}".format(
+                guide.speaker,
+                f" → {guide.display_name}" if guide.display_name else "",
+                f" ({guide.guidance})" if guide.guidance else "",
+            )
+            for guide in request.speaker_guides
+        ) or "- 없음"
+        if mode == "refine":
+            task = (
+                "전사문을 읽기 쉬운 한국어 대화 기록으로 다듬으세요. 맞춤법·띄어쓰기·문장부호를 고치되 "
+                "발언의 뜻, 화자 순서, 시각 정보는 바꾸지 마세요. 화자 표기와 시각 표기는 가능한 한 유지하세요."
+            )
+            output = "다듬은 대화 본문만 Markdown으로 반환하세요. 설명, JSON, 코드 블록은 쓰지 마세요."
+        else:
+            task = "전사문을 사실에 근거해 한국어 회의 요약으로 정리하세요. 전사문에 없는 사실은 만들지 마세요."
+            output = (
+                "Markdown으로 반환하세요. `## 개요`, `## 핵심 내용`, `## 결정 사항`, `## 할 일`, "
+                "`## 확인이 필요한 내용` 제목을 사용하고, 근거가 없는 항목은 '확인된 내용이 없습니다.'라고 적으세요."
+            )
+        return "\n\n".join(
+            (
+                task,
+                output,
+                f"[대화 목적·배경]\n{request.background or '제공되지 않음'}",
+                f"[화자 안내]\n{speaker_guides}",
+            )
+        )
+
+    @staticmethod
+    def _document_messages(attachment_name: str, attachment_content: str, user_request: str) -> list[dict[str, str]]:
+        """Use Agent Chat's attachment wrapper verbatim in one user message."""
+
+        return [
+            {
+                "role": "user",
+                "content": (
+                    f"[첨부 파일: {attachment_name}]\n{attachment_content}\n[첨부 파일 끝]"
+                    f"\n\n[사용자 요청]\n{user_request}"
+                ),
+            }
+        ]
+
+    def _request_document(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        reasoning_effort: str | None,
+        should_cancel: CancelCallback | None,
+    ) -> str:
+        assert self.client is not None
+
+        response = self.client.create_chat_completion(
+            model,
+            messages=messages,
+            temperature=0,
+            # Agent Chat leaves output length to the selected model/server and
+            # does not automatically retry with a different inference setup.
+            max_tokens=None,
+            json_mode=False,
+            reasoning_effort=reasoning_effort,
+            reasoning_effort_retry_levels=(),
+            retry_on_length=False,
+            should_cancel=should_cancel,
+        )
+        self._raise_if_cancelled(should_cancel)
+        document = response.strip()
+        if not document:
+            raise RefinementError("AI가 비어 있는 문서를 반환했습니다. 원본 전사문은 그대로 유지됩니다.")
+        return document
 
     @staticmethod
     def _messages(
@@ -530,6 +721,23 @@ class TranscriptRefiner:
             raise RefinementCancelled("AI 정리 요청을 취소했습니다.")
 
 
+@contextmanager
+def _temporary_transcript_document(contents: str) -> Iterator[Path]:
+    """Materialize one transcript attachment and always remove it afterwards."""
+
+    with TemporaryDirectory(prefix="talktracker-transcript-") as directory:
+        path = Path(directory) / "transcript.md"
+        path.write_text(contents, encoding="utf-8")
+        yield path
+
+
+def _transcript_attachment_name(source_name: str) -> str:
+    """Give the temporary Markdown file the stable name users would expect."""
+
+    stem = Path(source_name).stem.strip() or "전사문"
+    return f"{stem}-전사문.md"
+
+
 def _segments_for_utterances(utterances: list["Utterance"]) -> tuple[_Segment, ...]:
     """Create request-only segments while retaining each source utterance id.
 
@@ -714,6 +922,8 @@ def render_original_conversation(analysis: "AnalysisResult") -> str:
 
 
 def render_refined_conversation(analysis: "AnalysisResult", result: AIRefinementResult) -> str:
+    if result.refined_document.strip():
+        return result.refined_document.strip()
     return _render_conversation(analysis.utterances, result.refined_text_by_segment_id, result.speaker_display_names)
 
 
@@ -736,6 +946,14 @@ def render_summary(summary: ConversationSummary) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_result_summary(result: AIRefinementResult) -> str:
+    """Render either a document-first summary or the large-input fallback."""
+
+    if result.summary_document.strip():
+        return result.summary_document.strip()
+    return render_summary(result.summary) if result.summary else ""
+
+
 def render_selected_markdown(analysis: "AnalysisResult", result: AIRefinementResult) -> str:
     """Render exactly the requested, non-secret output sections for saving."""
 
@@ -752,7 +970,7 @@ def render_selected_markdown(analysis: "AnalysisResult", result: AIRefinementRes
     for title, body in (
         ("원본 전사 메시지", render_original_conversation(analysis) if result.selection.original else ""),
         ("다듬은 대화", render_refined_conversation(analysis, result) if result.selection.refined else ""),
-        ("요약", render_summary(result.summary) if result.selection.summary and result.summary else ""),
+        ("요약", render_result_summary(result) if result.selection.summary else ""),
     ):
         if body:
             lines.extend(["", f"## {title}", "", body])
@@ -776,9 +994,9 @@ def render_result_documents(analysis: "AnalysisResult", result: AIRefinementResu
         documents["refined"] = "\n".join(
             ["# 다듬은 대화", "", *metadata, "", "## 대화 내용", "", render_refined_conversation(analysis, result), *warnings]
         ).rstrip() + "\n"
-    if result.selection.summary and result.summary:
+    if result.selection.summary and render_result_summary(result):
         documents["summary"] = "\n".join(
-            ["# 요약", "", *metadata, "", "## 요약 내용", "", render_summary(result.summary), *warnings]
+            ["# 요약", "", *metadata, "", "## 요약 내용", "", render_result_summary(result), *warnings]
         ).rstrip() + "\n"
     return documents
 

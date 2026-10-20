@@ -36,7 +36,7 @@ from .core.refinement import (
     render_original_conversation,
     render_refined_conversation,
     render_result_documents,
-    render_summary,
+    render_result_summary,
 )
 from .core.llm_client import LocalLLMError
 from .core.workflow import AIRefinementBusyError, AIRefinementManager, AIRefinementState, LocalLLMConnectionManager
@@ -153,11 +153,12 @@ def _refinement_payload(
     sections: dict[str, str] = {"original": render_original_conversation(analysis)}
     if result.selection.refined:
         sections["refined"] = render_refined_conversation(analysis, result)
-    if result.selection.summary and result.summary:
-        sections["summary"] = render_summary(result.summary)
+    if result.selection.summary and render_result_summary(result):
+        sections["summary"] = render_result_summary(result)
     payload["result"] = {
         "sections": sections,
         "warnings": list(result.warnings),
+        "input_selection_summary": result.attachment_selection_summary,
         "prompt_version": result.prompt_version,
     }
     return payload
@@ -338,7 +339,7 @@ def _index_page(
   </section>
   <section id="ai-refinement" class="hidden">
     <h2>결과 만들기</h2>
-    <p class="hint">원본 전사는 분석 결과로 자동 보존됩니다. 다듬은 대화와 요약을 선택하면 현재 연결한 로컬 AI 서버로 전사문과 아래 안내 입력이 전달됩니다.</p>
+    <p class="hint">원본 전사는 분석 결과로 자동 보존됩니다. 일반 길이의 전사문은 문서 전체와 아래 안내를 로컬 AI 서버에 전달해 다듬은 대화·요약을 별도 Markdown 문서로 만듭니다.</p>
     <details class="original-preview"><summary>원본 전사 보기</summary><p class="hint">AI에 전달할 원본입니다. 목적·배경 안내를 입력하기 전에 내용을 확인하세요.</p><pre id="ai-original-transcript">원본 전사를 불러오는 중…</pre></details>
     <div class="choices" role="group" aria-label="받을 결과 선택">
       <label class="choice"><input id="ai-refined" type="checkbox"><span><strong>다듬은 대화</strong><span class="choice-description">AI가 말투와 오탈자를 다듬어 읽기 쉬운 대화로 만듭니다. 요약과 함께 선택할 수 있습니다.</span></span></label>
@@ -359,7 +360,7 @@ def _index_page(
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [], llmReasoningSupported = false;
+  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [], aiResultInputSelectionSummary = "", llmReasoningSupported = false;
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token")?.value.trim() || "";
@@ -407,7 +408,7 @@ def _index_page(
     const panel = $("ai-refinement");
     if (panel.dataset.jobId === job.id) return;
     panel.dataset.jobId = job.id;
-    aiResultView = ""; aiResultSections = {}; aiResultWarnings = [];
+    aiResultView = ""; aiResultSections = {}; aiResultWarnings = []; aiResultInputSelectionSummary = "";
     $("ai-results").innerHTML = "";
     $("ai-refined").checked = false;
     $("ai-summary").checked = false;
@@ -424,7 +425,8 @@ def _index_page(
     const choices = keys.map((key) => `<label class="result-choice"><input type="radio" name="ai-result-view" value="${key}"${key === aiResultView ? " checked" : ""}>${escapeHtml(AI_RESULT_LABELS[key])}</label>`).join("");
     const documents = keys.map((key) => `<a download href="${apiUrl(`/api/jobs/${activeId}/ai-results/${key}.md`, true)}">${escapeHtml(AI_RESULT_LABELS[key])} 문서 다운로드</a>`).join(" · ");
     const warnings = aiResultWarnings.map((warning) => `<p class="notice error">${escapeHtml(warning)}</p>`).join("");
-    $("ai-results").innerHTML = `${warnings}<div class="result-switcher"><strong>현재 화면: ${escapeHtml(AI_RESULT_LABELS[aiResultView])}</strong><div>${choices}</div><p class="hint">원본 전사는 분석 결과이며, AI 결과는 별도 문서로 보존됩니다.</p><pre class="output">${escapeHtml(aiResultSections[aiResultView])}</pre><p class="actions">${documents}</p></div>`;
+    const inputSelection = aiResultInputSelectionSummary ? `<p class="hint">모델에 전달한 전사문: ${escapeHtml(aiResultInputSelectionSummary)}</p>` : "";
+    $("ai-results").innerHTML = `${warnings}<div class="result-switcher"><strong>현재 화면: ${escapeHtml(AI_RESULT_LABELS[aiResultView])}</strong><div>${choices}</div><p class="hint">원본 전사는 분석 결과이며, AI 결과는 별도 문서로 보존됩니다.</p>${inputSelection}<pre class="output">${escapeHtml(aiResultSections[aiResultView])}</pre><p class="actions">${documents}</p></div>`;
     $("ai-results").querySelectorAll('input[name="ai-result-view"]').forEach((input) => input.addEventListener("change", () => { aiResultView = input.value; renderAiResultDocuments(); }));
   }
   function renderAiRefinement(data) {
@@ -449,6 +451,7 @@ def _index_page(
     if (!result) return;
     aiResultSections = result.sections || {};
     aiResultWarnings = result.warnings || [];
+    aiResultInputSelectionSummary = result.input_selection_summary || "";
     renderAiResultDocuments();
   }
   function stopRefinementWatching() { if (refinementPolling) { clearInterval(refinementPolling); refinementPolling = null; } }
@@ -537,16 +540,13 @@ def _index_page(
     return input;
   }
   function updateLlmReasoningControl(connection) {
-    const settings = connection.reasoning_effort || {}, levels = settings.supported_levels || [];
-    llmReasoningSupported = Boolean(settings.supported && levels.includes("medium") && levels.includes("low"));
+    llmReasoningSupported = false;
     const checkbox = $("llm-auto-lower-reasoning");
-    checkbox.checked = Boolean(settings.auto_lower_on_length);
-    checkbox.disabled = !llmReasoningSupported;
-    $("llm-reasoning-hint").textContent = llmReasoningSupported
-      ? "지원 확인됨: 항상 중간 강도로 시작합니다. 켜면 응답 길이 한도에서 낮은 강도로 조정합니다. 기본값은 꺼짐입니다."
-      : "선택한 서버·모델에서 추론 강도 자동 조정을 확인하지 못했습니다. 연결 확인 뒤 지원 여부가 표시됩니다.";
+    checkbox.checked = false;
+    checkbox.disabled = true;
+    $("llm-reasoning-hint").textContent = "Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다.";
   }
-  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); $("llm-auto-lower-reasoning").disabled = value || !llmReasoningSupported; }
+  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); $("llm-auto-lower-reasoning").disabled = true; }
   async function loadLlmConnection() {
     try {
       const connection = await request("/api/local-llm");
@@ -576,9 +576,7 @@ def _index_page(
       const connection = await request("/api/local-llm/verify", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)});
       const suffix = connection.response_preview ? ` 응답: ${connection.response_preview}` : "";
       updateLlmReasoningControl(connection);
-      const levels = connection.reasoning_effort?.supported_levels || [];
-      const reasoning = levels.includes("medium") && levels.includes("low") ? ` 추론 강도 자동 조정 지원도 확인했습니다 (${levels.map((level) => level === "medium" ? "중간" : "낮음").join(", ")}).` : " 추론 강도 자동 조정은 이 서버·모델에서 사용할 수 없습니다.";
-      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.${reasoning}${suffix}`);
+      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다. AI 정리에는 추론 강도 자동(auto)을 사용합니다.${suffix}`);
       setLlmRecentServers(connection.recent_base_urls || []);
       $("llm-api-key").value = "";
     } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
@@ -589,9 +587,9 @@ def _index_page(
     try {
       const connection = await request("/api/local-llm/reasoning-effort", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({auto_lower_on_length:requested})});
       updateLlmReasoningControl(connection);
-      setLlmStatus(requested ? "중간 추론 강도로 시작하고 필요하면 낮은 강도로 조정하도록 설정했습니다." : "중간 추론 강도로 시작하며, 응답 길이 한도에도 추론 강도를 낮추지 않도록 설정했습니다.");
+      setLlmStatus("AI 정리에는 추론 강도 자동(auto)을 사용하며, 응답 중 자동 조정하지 않습니다.");
     } catch (error) { checkbox.checked = !requested; setLlmStatus(error.message, true); }
-    finally { checkbox.disabled = !llmReasoningSupported; }
+    finally { checkbox.disabled = true; }
   }
   async function loadProfiles() {
     const data = await request("/api/profiles"); profiles = data.profiles;
@@ -633,7 +631,7 @@ def _index_page(
     <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
     <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
     <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
-    <label class="choice"><input id="llm-auto-lower-reasoning" type="checkbox" disabled><span><strong>추론 강도 자동 조정</strong><span id="llm-reasoning-hint" class="choice-description">연결 확인 뒤 지원 여부가 표시됩니다.</span></span></label>
+    <label class="choice"><input id="llm-auto-lower-reasoning" type="checkbox" disabled><span><strong>추론 강도 자동 조정 (사용하지 않음)</strong><span id="llm-reasoning-hint" class="choice-description">AI 정리에는 자동(auto)을 사용합니다.</span></span></label>
     <p id="llm-status" class="notice">로컬 AI 연결 상태를 확인하고 있습니다…</p>
   </section>
     """.replace("__LOCAL_LLM_NETWORK_NOTICE__", local_llm_network_notice) if local_llm_available else ""

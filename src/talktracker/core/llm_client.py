@@ -188,7 +188,7 @@ class OpenAICompatibleLocalClient:
         *,
         messages: list[dict[str, str]],
         temperature: float = 0,
-        max_tokens: int = 1_024,
+        max_tokens: int | None = 1_024,
         json_mode: bool = False,
         reasoning_effort: str | None = None,
         reasoning_effort_retry_levels: tuple[str, ...] = (),
@@ -217,18 +217,19 @@ class OpenAICompatibleLocalClient:
             raise LocalLLMError("AI 정리에 사용할 모델을 선택해 주세요.")
         if not messages:
             raise LocalLLMError("AI 정리에 보낼 대화 내용을 찾지 못했습니다.")
-        requested_tokens = max(1, int(max_tokens))
+        requested_tokens = max(1, int(max_tokens)) if max_tokens is not None else None
         if _remaining_reasoning_effort_levels is None:
             remaining_reasoning_effort_levels = _normalize_reasoning_effort_levels(reasoning_effort_retry_levels)
         else:
             remaining_reasoning_effort_levels = _remaining_reasoning_effort_levels
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": max(0, min(2, float(temperature))),
-            "max_tokens": requested_tokens,
             "stream": True,
         }
+        if requested_tokens is not None:
+            body["max_tokens"] = requested_tokens
         if json_mode:
             # This is the standard Chat Completions JSON mode.  It makes a
             # model's output contract explicit instead of relying only on a
@@ -334,8 +335,14 @@ class OpenAICompatibleLocalClient:
                 finish_reasons.update(fallback_finish_reasons)
         reached_length_limit = bool({"length", "max_tokens"} & finish_reasons)
         if reached_length_limit:
-            retry_tokens = _expanded_token_limit(requested_tokens)
-            if retry_on_length and not _length_retry_attempted and retry_tokens > requested_tokens:
+            retry_tokens = _expanded_token_limit(requested_tokens) if requested_tokens is not None else None
+            if (
+                retry_on_length
+                and requested_tokens is not None
+                and retry_tokens is not None
+                and not _length_retry_attempted
+                and retry_tokens > requested_tokens
+            ):
                 if on_length_retry:
                     on_length_retry(requested_tokens, retry_tokens)
                 content = self.create_chat_completion(
@@ -358,7 +365,7 @@ class OpenAICompatibleLocalClient:
                 if on_length_retry_success:
                     on_length_retry_success(retry_tokens)
                 return content
-            if retry_on_length and remaining_reasoning_effort_levels:
+            if retry_on_length and requested_tokens is not None and remaining_reasoning_effort_levels:
                 next_effort = remaining_reasoning_effort_levels[0]
                 if on_reasoning_effort_lowered:
                     on_reasoning_effort_lowered(next_effort)
@@ -382,6 +389,12 @@ class OpenAICompatibleLocalClient:
                     _length_retry_attempted=True,
                     _remaining_reasoning_effort_levels=remaining_reasoning_effort_levels[1:],
                 )
+            # Agent Chat does not prescribe a ``max_tokens`` value for a
+            # normal attachment request.  Preserve any usable streamed text
+            # from a server that reports its own output limit rather than
+            # turning that free-form answer into an automatic retry cycle.
+            if requested_tokens is None and content:
+                return content
             raise LocalLLMResponseLengthError(_length_limit_message(_length_retry_attempted))
         if not content:
             raise LocalLLMResponseError(_empty_completion_message(saw_reasoning, finish_reasons))

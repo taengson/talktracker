@@ -329,42 +329,10 @@ class AIRefinementManager:
             else:
                 client = None
             refiner = TranscriptRefiner(client)
-            reasoning_settings = settings.reasoning_effort_settings_for(settings.base_url, settings.model)
-            reasoning_supported = bool(
-                reasoning_settings
-                and _supports_automatic_reasoning_adjustment(reasoning_settings.supported_efforts)
-            )
-            automatic_effort_enabled = bool(
-                reasoning_supported
-                and reasoning_settings
-                and reasoning_settings.auto_lower_on_length
-            )
-            # A verified reasoning-capable model starts at the moderate level.
-            # The user's opt-in controls only whether a length-limited request
-            # may step down to ``low``; it must not silently restore the
-            # server's potentially much stronger default level.
-            initial_reasoning_effort = "medium" if reasoning_supported else None
-            fallback_reasoning_efforts = (
-                tuple(effort for effort in reasoning_settings.supported_efforts if effort != "medium")
-                if automatic_effort_enabled and reasoning_settings
-                else ()
-            )
             result = refiner.refine(
                 analysis,
                 request,
                 model=settings.model,
-                response_token_limit=settings.response_token_limit_for(settings.base_url, settings.model),
-                reasoning_effort=initial_reasoning_effort,
-                reasoning_effort_fallback_levels=fallback_reasoning_efforts,
-                on_length_retry_success=lambda max_tokens: self._connection_manager.remember_response_token_limit(
-                    max_tokens,
-                    base_url=settings.base_url,
-                    model=settings.model,
-                ),
-                on_reasoning_effort_fallback=lambda: self._connection_manager.disable_reasoning_effort(
-                    base_url=settings.base_url,
-                    model=settings.model,
-                ),
                 progress=self._update_progress,
                 should_cancel=cancel_event.is_set,
             )

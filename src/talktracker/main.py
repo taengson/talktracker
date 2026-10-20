@@ -24,7 +24,7 @@ from .core.refinement import (
     merge_ai_refinement_results,
     render_refined_conversation,
     render_result_documents,
-    render_summary,
+    render_result_summary,
 )
 from .core.workflow import AIRefinementBusyError, AIRefinementManager, LocalLLMConnectionManager
 from .core.models import (
@@ -469,16 +469,9 @@ class TalkTrackerApp(tk.Tk):
         url_value = tk.StringVar(value=saved.base_url or "http://127.0.0.1:8000")
         api_key_value = tk.StringVar()
         model_value = tk.StringVar(value=saved.model)
-        saved_reasoning = saved.reasoning_effort_settings_for(saved.base_url, saved.model)
-        auto_lower_reasoning_value = tk.BooleanVar(
-            value=bool(saved_reasoning and saved_reasoning.auto_lower_on_length)
-        )
+        auto_lower_reasoning_value = tk.BooleanVar(value=False)
         reasoning_hint_value = tk.StringVar(
-            value=(
-                "이전에 확인한 추론 강도 설정입니다. 연결 확인 뒤 현재 서버에서도 지원되는지 다시 확인합니다."
-                if saved_reasoning and saved_reasoning.supported_efforts
-                else "연결 확인 뒤 이 서버·모델에서 지원되는지 표시합니다. 기본값은 꺼짐입니다."
-            )
+            value="Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다."
         )
         status_value = tk.StringVar(
             value=(
@@ -668,25 +661,10 @@ class TalkTrackerApp(tk.Tk):
 
         reasoning_area = tk.Frame(dialog, bg=self.GROUND)
         reasoning_area.pack(fill="x", padx=24, pady=(0, 12))
-        reasoning_supported = False
-
-        def change_auto_lower_reasoning() -> None:
-            try:
-                updated = self.llm_connection_manager.set_auto_lower_reasoning_effort(auto_lower_reasoning_value.get())
-            except LocalLLMError as error:
-                auto_lower_reasoning_value.set(False)
-                reasoning_hint_value.set(str(error))
-                return
-            if updated.auto_lower_on_length:
-                reasoning_hint_value.set("중간 추론 강도로 시작하고, 응답 길이 한도에 도달하면 낮은 강도로 다시 시도합니다.")
-            else:
-                reasoning_hint_value.set("중간 추론 강도로 시작합니다. 응답 길이 한도에 도달해도 추론 강도는 낮추지 않습니다.")
-
         auto_lower_check = tk.Checkbutton(
             reasoning_area,
-            text="추론 강도 자동 조정",
+            text="추론 강도 자동 조정 (사용하지 않음)",
             variable=auto_lower_reasoning_value,
-            command=change_auto_lower_reasoning,
             state="disabled",
             bg=self.GROUND,
             fg=self.INK,
@@ -708,20 +686,10 @@ class TalkTrackerApp(tk.Tk):
             wraplength=555,
         ).pack(anchor="w", padx=(25, 0), pady=(2, 0))
 
-        def set_reasoning_support(levels: tuple[str, ...], *, verified: bool) -> None:
-            nonlocal reasoning_supported
-            reasoning_supported = bool(verified and {"medium", "low"}.issubset(levels))
-            auto_lower_check.configure(state="normal" if reasoning_supported and not self.llm_connection_operation_active else "disabled")
-            if reasoning_supported:
-                current_settings = self.llm_connection_manager.snapshot().settings
-                current_capability = current_settings.reasoning_effort_settings_for(current_settings.base_url, current_settings.model)
-                auto_lower_reasoning_value.set(bool(current_capability and current_capability.auto_lower_on_length))
-                reasoning_hint_value.set(
-                    "지원 확인됨: 항상 중간 강도로 시작합니다. 켜면 응답 길이 한도에서 낮은 강도로 조정합니다. 기본값은 꺼짐입니다."
-                )
-            else:
-                auto_lower_reasoning_value.set(False)
-                reasoning_hint_value.set("이 서버·모델에서는 추론 강도 자동 조정을 확인하지 못했습니다. 기본 응답 길이 재시도만 사용합니다.")
+        def set_attachment_reasoning_policy() -> None:
+            auto_lower_reasoning_value.set(False)
+            auto_lower_check.configure(state="disabled")
+            reasoning_hint_value.set("Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다.")
 
         actions = tk.Frame(dialog, bg=self.GROUND)
         actions.pack(fill="x", padx=24, pady=(0, 22))
@@ -745,7 +713,7 @@ class TalkTrackerApp(tk.Tk):
             api_key_toggle.configure(state=state)
             model_entry.configure(state=state)
             model_options_button.configure(state=state)
-            auto_lower_check.configure(state="disabled" if value or not reasoning_supported else "normal")
+            auto_lower_check.configure(state="disabled")
 
         def start_operation(operation: str) -> None:
             if self.llm_connection_operation_active:
@@ -805,14 +773,11 @@ class TalkTrackerApp(tk.Tk):
                     elif event == "verified":
                         preview = getattr(payload, "response_preview", "")
                         suffix = f" 응답: {preview}" if preview else ""
-                        levels = tuple(getattr(payload, "supported_reasoning_efforts", ()))
-                        set_reasoning_support(levels, verified=True)
-                        reasoning = (
-                            " 추론 강도 자동 조정도 지원됩니다."
-                            if {"medium", "low"}.issubset(levels)
-                            else " 추론 강도 자동 조정은 이 서버·모델에서 사용할 수 없습니다."
+                        set_attachment_reasoning_policy()
+                        status_value.set(
+                            f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다. "
+                            f"AI 정리에는 추론 강도 자동(auto)을 사용합니다.{suffix}"
                         )
-                        status_value.set(f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다.{reasoning}{suffix}")
                         status_label.configure(bg="#E8F6F0", fg=self.SUCCESS)
                         self.refresh_llm_connection_status()
                     else:
@@ -1507,7 +1472,7 @@ class TalkTrackerApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         tk.Label(
             self.ai_refinement_frame,
-            text="원본 전사는 분석 결과로 자동 보존됩니다. 다듬은 대화와 요약을 선택하면 로컬 AI 서버로 별도 결과를 만듭니다.",
+            text="원본 전사는 자동 보존됩니다. 전사문은 Agent Chat 방식으로 첨부해 별도 대화·요약 문서를 만듭니다.",
             bg="#F7FBF9",
             fg=self.MUTED,
             font=("Segoe UI", 8),
@@ -2171,10 +2136,15 @@ class TalkTrackerApp(tk.Tk):
             ("original", "원본 전사", "AI가 바꾸지 않은 분석 결과입니다."),
         ]
         result = self.ai_refinement_result
+        attachment_note = (
+            f" 모델에 전달한 전사문: {result.attachment_selection_summary}."
+            if result and result.attachment_selection_summary
+            else ""
+        )
         if result and result.selection.refined:
-            views.append(("refined", "다듬은 대화", "AI가 다듬어 만든 별도 결과입니다. 원본 전사는 그대로 보존됩니다."))
-        if result and result.selection.summary and result.summary:
-            views.append(("summary", "요약", "AI가 핵심 내용, 결정 사항, 할 일을 정리한 별도 결과입니다."))
+            views.append(("refined", "다듬은 대화", "AI가 다듬어 만든 별도 결과입니다. 원본 전사는 그대로 보존됩니다." + attachment_note))
+        if result and result.selection.summary and (result.summary or result.summary_document):
+            views.append(("summary", "요약", "AI가 핵심 내용, 결정 사항, 할 일을 정리한 별도 결과입니다." + attachment_note))
         return tuple(views)
 
     def _refresh_result_views(self, *, preferred: str | None = None) -> None:
@@ -2246,7 +2216,7 @@ class TalkTrackerApp(tk.Tk):
                 [
                     f"{result.source_name} · 요약",
                     "[요약]",
-                    render_summary(self.ai_refinement_result.summary or ""),
+                    render_result_summary(self.ai_refinement_result),
                 ]
             )
         else:

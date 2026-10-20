@@ -37,6 +37,7 @@ from .refinement import (
     render_original_conversation,
     render_refined_conversation,
     render_result_documents,
+    render_result_summary,
     render_selected_markdown,
     render_summary,
 )
@@ -86,6 +87,7 @@ __all__ = [
     "render_original_conversation",
     "render_refined_conversation",
     "render_result_documents",
+    "render_result_summary",
     "render_selected_markdown",
     "render_summary",
 ]

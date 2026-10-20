@@ -68,6 +68,13 @@ class FakeLocalLLMClient:
             from talktracker.core.llm_client import LocalLLMCancelled
 
             raise LocalLLMCancelled("AI 정리 요청을 취소했습니다.")
+        # The normal transcript path is deliberately a plain document request,
+        # matching a user-facing chat attachment instead of a private JSON-ID
+        # contract.  Keep this web regression test on that path.
+        if messages[0]["content"].startswith("[첨부 파일:"):
+            if "회의 요약" in messages[0]["content"]:
+                return "## 개요\n\n초안 준비 일정과 확인 작업을 논의했다.\n\n## 핵심 내용\n\n- 다음 주까지 초안을 준비한다."
+            return "(손태영)  00:00 – 00:03\n다음 주까지 초안을 준비하겠습니다.\n\n(손태영)  00:03 – 00:07\n일정을 확인하겠습니다."
         return json.dumps(
             {
                 "segments": [
