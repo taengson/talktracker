@@ -197,6 +197,7 @@ class OpenAICompatibleLocalClient:
         on_length_retry_success: Callable[[int], None] | None = None,
         on_reasoning_effort_fallback: Callable[[], None] | None = None,
         on_reasoning_effort_lowered: Callable[[str], None] | None = None,
+        allow_reasoning_effort_fallback: bool = True,
         should_cancel: Callable[[], bool] | None = None,
         _length_retry_attempted: bool = False,
         _remaining_reasoning_effort_levels: tuple[str, ...] | None = None,
@@ -259,6 +260,11 @@ class OpenAICompatibleLocalClient:
             if error is not None:
                 if not reasoning_effort:
                     raise error
+                if not allow_reasoning_effort_fallback:
+                    raise LocalLLMError(
+                        f"로컬 AI 서버가 선택한 추론 강도({reasoning_effort})를 지원하지 않습니다. "
+                        "기본, medium, low, none 중 서버에서 지원하는 값을 선택해 주세요."
+                    ) from error
                 # ``reasoning_effort`` is used by current Qwen services but is
                 # not implemented by every OpenAI-compatible local server.
                 # Keep the user's work moving on those servers by falling back
@@ -275,7 +281,7 @@ class OpenAICompatibleLocalClient:
         def close_on_cancel() -> None:
             while not done.is_set():
                 if should_cancel and should_cancel():
-                    response.close()
+                    self._close_completion_response(response)
                     return
                 sleep(0.05)
 
@@ -358,6 +364,7 @@ class OpenAICompatibleLocalClient:
                     on_length_retry_success=on_length_retry_success,
                     on_reasoning_effort_fallback=on_reasoning_effort_fallback,
                     on_reasoning_effort_lowered=on_reasoning_effort_lowered,
+                    allow_reasoning_effort_fallback=allow_reasoning_effort_fallback,
                     should_cancel=should_cancel,
                     _length_retry_attempted=True,
                     _remaining_reasoning_effort_levels=remaining_reasoning_effort_levels,
@@ -385,6 +392,7 @@ class OpenAICompatibleLocalClient:
                     on_length_retry_success=on_length_retry_success,
                     on_reasoning_effort_fallback=on_reasoning_effort_fallback,
                     on_reasoning_effort_lowered=on_reasoning_effort_lowered,
+                    allow_reasoning_effort_fallback=allow_reasoning_effort_fallback,
                     should_cancel=should_cancel,
                     _length_retry_attempted=True,
                     _remaining_reasoning_effort_levels=remaining_reasoning_effort_levels[1:],
@@ -413,6 +421,26 @@ class OpenAICompatibleLocalClient:
             raise LocalLLMHTTPError(error.code, _server_error_message(error)) from error
         except (URLError, socket.timeout, TimeoutError, OSError) as error:
             raise LocalLLMError("로컬 AI 서버에 연결할 수 없습니다. 서버 주소와 실행 상태를 확인해 주세요.") from error
+
+    @staticmethod
+    def _close_completion_response(response: Any) -> None:
+        """Interrupt a blocking stream read promptly after cancellation.
+
+        Closing ``HTTPResponse`` alone does not reliably wake ``readline`` on
+        every supported Python and operating-system combination. Shutting down
+        its underlying socket first makes the cancellation button responsive
+        even while a local reasoning model has not emitted a token yet.
+        """
+
+        response_file = getattr(response, "fp", None)
+        raw = getattr(response_file, "raw", None)
+        stream_socket = getattr(raw, "_sock", None)
+        if stream_socket is not None:
+            try:
+                stream_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        response.close()
 
     def _request_json(
         self,

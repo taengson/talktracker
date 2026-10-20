@@ -221,6 +221,20 @@ class OpenAICompatibleLocalClientTests(unittest.TestCase):
         self.assertEqual(_OpenAICompatibleHandler.received_bodies[0]["reasoning_effort"], "medium")
         self.assertNotIn("reasoning_effort", _OpenAICompatibleHandler.received_bodies[1])
 
+    def test_explicit_reasoning_effort_does_not_silently_fall_back_to_server_default(self) -> None:
+        _OpenAICompatibleHandler.reject_reasoning_effort = True
+
+        with self.assertRaisesRegex(LocalLLMError, "선택한 추론 강도\(none\)"):
+            OpenAICompatibleLocalClient(LocalLLMConnection.create(self.base_url)).create_chat_completion(
+                "Qwen3.8-27B",
+                messages=[{"role": "user", "content": "문서를 요약해"}],
+                reasoning_effort="none",
+                allow_reasoning_effort_fallback=False,
+            )
+
+        self.assertEqual(len(_OpenAICompatibleHandler.received_bodies), 1)
+        self.assertEqual(_OpenAICompatibleHandler.received_body["reasoning_effort"], "none")
+
     def test_length_limited_completion_retries_once_with_a_larger_budget(self) -> None:
         _OpenAICompatibleHandler.stream_event_batches = [
             [{"choices": [{"delta": {"content": "{\"segments\": ["}, "finish_reason": "length"}]}]

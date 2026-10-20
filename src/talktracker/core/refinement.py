@@ -29,11 +29,17 @@ if TYPE_CHECKING:
     from .analysis import AnalysisResult, Utterance
 
 
-PROMPT_VERSION = "2026-10-20.4"
+PROMPT_VERSION = "2026-10-20.5"
 ProgressCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 LengthRetrySuccessCallback = Callable[[int], None]
 ReasoningEffortFallbackCallback = Callable[[], None]
+
+# A user chooses an effort for each result-making request. ``default`` is
+# deliberately represented as ``None`` at the API boundary so an
+# OpenAI-compatible server can retain its own configured default.
+REASONING_EFFORT_DEFAULT = "default"
+REASONING_EFFORT_CHOICES = (REASONING_EFFORT_DEFAULT, "medium", "low", "none")
 
 # Keep each request small enough that a local model does not spend most of its
 # context window reasoning about one very long transcript.  We prefer utterance
@@ -87,9 +93,15 @@ class AIRefinementRequest:
     selection: ResultSelection
     background: str = ""
     speaker_guides: tuple[SpeakerGuide, ...] = ()
+    reasoning_effort: str = REASONING_EFFORT_DEFAULT
 
     def normalized(self) -> "AIRefinementRequest":
         self.selection.validate()
+        if not isinstance(self.reasoning_effort, str):
+            raise RefinementError("추론 강도는 기본, medium, low, none 중에서 선택해 주세요.")
+        reasoning_effort = self.reasoning_effort.strip().lower()
+        if reasoning_effort not in REASONING_EFFORT_CHOICES:
+            raise RefinementError("추론 강도는 기본, medium, low, none 중에서 선택해 주세요.")
         guides: list[SpeakerGuide] = []
         for guide in self.speaker_guides:
             speaker = guide.speaker.strip()
@@ -101,7 +113,14 @@ class AIRefinementRequest:
             selection=self.selection,
             background=self.background.strip(),
             speaker_guides=tuple(guides),
+            reasoning_effort=reasoning_effort,
         )
+
+    @property
+    def requested_reasoning_effort(self) -> str | None:
+        """Return the optional field sent to the local model server."""
+
+        return None if self.reasoning_effort == REASONING_EFFORT_DEFAULT else self.reasoning_effort
 
 
 @dataclass(frozen=True)
@@ -221,7 +240,7 @@ class TranscriptRefiner:
                     attachment_source=attachment_source,
                     attachment_chunks=create_attachment_chunks(attachment_source),
                     model=model,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=normalized.requested_reasoning_effort,
                     progress=progress,
                     should_cancel=should_cancel,
                 )
@@ -322,7 +341,7 @@ class TranscriptRefiner:
         refined_document = ""
         if request.selection.refined:
             if progress:
-                progress("AI가 전사문을 다듬은 대화 문서로 만들고 있습니다…")
+                progress(_document_progress_message("AI가 전사문을 다듬은 대화 문서로 만들고 있습니다", reasoning_effort))
             refined_document = self._request_document(
                 model,
                 messages_for("refine"),
@@ -333,7 +352,7 @@ class TranscriptRefiner:
         summary_document = ""
         if request.selection.summary:
             if progress:
-                progress("AI가 전사문 전체를 요약 문서로 만들고 있습니다…")
+                progress(_document_progress_message("AI가 전사문 전체를 요약 문서로 만들고 있습니다", reasoning_effort))
             summary_document = self._request_document(
                 model,
                 messages_for("summary"),
@@ -422,6 +441,10 @@ class TranscriptRefiner:
             reasoning_effort=reasoning_effort,
             reasoning_effort_retry_levels=(),
             retry_on_length=False,
+            # A person explicitly chose this level. Do not quietly retry at
+            # the server default (which may be much slower, e.g. Qwen xhigh)
+            # when a server rejects the optional field.
+            allow_reasoning_effort_fallback=False,
             should_cancel=should_cancel,
         )
         self._raise_if_cancelled(should_cancel)
@@ -736,6 +759,13 @@ def _transcript_attachment_name(source_name: str) -> str:
 
     stem = Path(source_name).stem.strip() or "전사문"
     return f"{stem}-전사문.md"
+
+
+def _document_progress_message(message: str, reasoning_effort: str | None) -> str:
+    """Make the selected request setting visible while a model is working."""
+
+    suffix = f" · 추론 강도 {reasoning_effort}" if reasoning_effort else " · 추론 강도 기본(서버 설정)"
+    return f"{message}{suffix}…"
 
 
 def _segments_for_utterances(utterances: list["Utterance"]) -> tuple[_Segment, ...]:

@@ -333,6 +333,7 @@ class AIRefinementManager:
                 analysis,
                 request,
                 model=settings.model,
+                reasoning_effort=request.requested_reasoning_effort,
                 progress=self._update_progress,
                 should_cancel=cancel_event.is_set,
             )

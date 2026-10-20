@@ -37,6 +37,8 @@ class FakeEngine:
 
 
 class FakeLocalLLMClient:
+    last_completion: dict[str, object] = {}
+
     def __init__(self, connection: LocalLLMConnection) -> None:
         self.connection = connection
 
@@ -62,8 +64,15 @@ class FakeLocalLLMClient:
         on_length_retry_success=None,
         on_reasoning_effort_fallback=None,
         on_reasoning_effort_lowered=None,
+        allow_reasoning_effort_fallback: bool = True,
         should_cancel=None,
     ) -> str:
+        type(self).last_completion = {
+            "model": model,
+            "messages": messages,
+            "reasoning_effort": reasoning_effort,
+            "allow_reasoning_effort_fallback": allow_reasoning_effort_fallback,
+        }
         if should_cancel and should_cancel():
             from talktracker.core.llm_client import LocalLLMCancelled
 
@@ -235,11 +244,13 @@ class ServerPageTests(unittest.TestCase):
         self.assertIn('id="server-setup"', page)
         self.assertIn('id="local-ai"', page)
         self.assertIn('/api/local-llm/verify', page)
-        self.assertIn('id="llm-auto-lower-reasoning"', page)
-        self.assertIn('/api/local-llm/reasoning-effort', page)
+        self.assertNotIn('id="llm-auto-lower-reasoning"', page)
+        self.assertNotIn('/api/local-llm/reasoning-effort', page)
         self.assertIn('id="llm-api-key"', page)
         self.assertIn('id="llm-url-options"', page)
         self.assertIn('id="ai-refinement"', page)
+        self.assertIn('id="ai-reasoning"', page)
+        self.assertIn('value="none"', page)
         self.assertIn('/ai-refinement/cancel', page)
         self.assertNotIn('id="ai-original"', page)
         self.assertIn("원본 전사는 분석 결과로 자동 보존됩니다.", page)
@@ -289,12 +300,9 @@ class ServerPageTests(unittest.TestCase):
                 self.assertTrue(verified.json()["connected"])
                 self.assertEqual(verified.json()["model"], "talktracker-test")
                 self.assertEqual(verified.json()["recent_base_urls"], ["http://localhost:11434/v1"])
-                self.assertFalse(verified.json()["reasoning_effort"]["supported"])
-                unsupported_preference = client.post(
-                    "/api/local-llm/reasoning-effort",
-                    json={"auto_lower_on_length": True},
-                )
-                self.assertEqual(unsupported_preference.status_code, 422)
+                self.assertNotIn("reasoning_effort", verified.json())
+                removed_preference = client.post("/api/local-llm/reasoning-effort")
+                self.assertEqual(removed_preference.status_code, 404)
 
                 network_server = client.post(
                     "/api/local-llm/models",
@@ -337,6 +345,7 @@ class ServerPageTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(manager.snapshot(job.id)["state"], "completed")
                 with TestClient(create_app(project_root=root, manager=manager, llm_connection_manager=llm_manager)) as client:
+                    FakeLocalLLMClient.last_completion = {}
                     before_ai = client.get(f"/api/jobs/{job.id}/ai-refinement")
                     self.assertEqual(before_ai.status_code, 200)
                     self.assertIsNone(before_ai.json()["result"])
@@ -350,6 +359,7 @@ class ServerPageTests(unittest.TestCase):
                         f"/api/jobs/{job.id}/ai-refinement",
                         json={
                             "selection": {"refined": True, "summary": False},
+                            "reasoning_effort": "none",
                             "background": "프로젝트 회의",
                             "speaker_guides": [{"speaker": "화자 1", "display_name": "손태영", "guidance": "프로젝트 매니저"}],
                         },
@@ -369,6 +379,8 @@ class ServerPageTests(unittest.TestCase):
                     self.assertIn("(손태영)", sections["refined"])
                     self.assertNotIn("summary", sections)
                     self.assertNotIn("프로젝트 매니저", str(status_payload))
+                    self.assertEqual(FakeLocalLLMClient.last_completion["reasoning_effort"], "none")
+                    self.assertFalse(FakeLocalLLMClient.last_completion["allow_reasoning_effort_fallback"])
                     summary_started = client.post(
                         f"/api/jobs/{job.id}/ai-refinement",
                         json={

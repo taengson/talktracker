@@ -155,6 +155,7 @@ class TalkTrackerApp(tk.Tk):
         self.progress_value = tk.DoubleVar(value=0)
         self.ai_include_refined = tk.BooleanVar(value=False)
         self.ai_include_summary = tk.BooleanVar(value=False)
+        self.ai_reasoning_effort = tk.StringVar(value="기본 (서버 설정)")
         self.ai_status_text = tk.StringVar(value="분석 전에도 만들 결과와 안내를 미리 선택할 수 있습니다.")
         self.ai_elapsed_text = tk.StringVar(value="")
         self.result_view_key = tk.StringVar(value="")
@@ -469,10 +470,6 @@ class TalkTrackerApp(tk.Tk):
         url_value = tk.StringVar(value=saved.base_url or "http://127.0.0.1:8000")
         api_key_value = tk.StringVar()
         model_value = tk.StringVar(value=saved.model)
-        auto_lower_reasoning_value = tk.BooleanVar(value=False)
-        reasoning_hint_value = tk.StringVar(
-            value="Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다."
-        )
         status_value = tk.StringVar(
             value=(
                 "같은 PC 또는 신뢰하는 사설망에서 실행 중인 OpenAI 호환 LLM 서버에 연결합니다."
@@ -659,38 +656,6 @@ class TalkTrackerApp(tk.Tk):
         )
         status_label.pack(fill="x", padx=24, pady=(0, 12))
 
-        reasoning_area = tk.Frame(dialog, bg=self.GROUND)
-        reasoning_area.pack(fill="x", padx=24, pady=(0, 12))
-        auto_lower_check = tk.Checkbutton(
-            reasoning_area,
-            text="추론 강도 자동 조정 (사용하지 않음)",
-            variable=auto_lower_reasoning_value,
-            state="disabled",
-            bg=self.GROUND,
-            fg=self.INK,
-            activebackground=self.GROUND,
-            activeforeground=self.INK,
-            selectcolor=self.PAPER,
-            font=("Segoe UI", 9, "bold"),
-            anchor="w",
-            cursor="hand2",
-        )
-        auto_lower_check.pack(anchor="w")
-        tk.Label(
-            reasoning_area,
-            textvariable=reasoning_hint_value,
-            bg=self.GROUND,
-            fg=self.MUTED,
-            font=("Segoe UI", 8),
-            justify="left",
-            wraplength=555,
-        ).pack(anchor="w", padx=(25, 0), pady=(2, 0))
-
-        def set_attachment_reasoning_policy() -> None:
-            auto_lower_reasoning_value.set(False)
-            auto_lower_check.configure(state="disabled")
-            reasoning_hint_value.set("Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다.")
-
         actions = tk.Frame(dialog, bg=self.GROUND)
         actions.pack(fill="x", padx=24, pady=(0, 22))
         actions.grid_columnconfigure(0, weight=1)
@@ -713,7 +678,6 @@ class TalkTrackerApp(tk.Tk):
             api_key_toggle.configure(state=state)
             model_entry.configure(state=state)
             model_options_button.configure(state=state)
-            auto_lower_check.configure(state="disabled")
 
         def start_operation(operation: str) -> None:
             if self.llm_connection_operation_active:
@@ -773,10 +737,9 @@ class TalkTrackerApp(tk.Tk):
                     elif event == "verified":
                         preview = getattr(payload, "response_preview", "")
                         suffix = f" 응답: {preview}" if preview else ""
-                        set_attachment_reasoning_policy()
                         status_value.set(
                             f"연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다. "
-                            f"AI 정리에는 추론 강도 자동(auto)을 사용합니다.{suffix}"
+                            f"결과 만들기에서 이번 요청의 추론 강도를 선택할 수 있습니다.{suffix}"
                         )
                         status_label.configure(bg="#E8F6F0", fg=self.SUCCESS)
                         self.refresh_llm_connection_status()
@@ -1514,8 +1477,34 @@ class TalkTrackerApp(tk.Tk):
                 justify="left",
             ).grid(row=row, column=1, sticky="ew", pady=1)
 
+        reasoning = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
+        reasoning.grid(row=3, column=0, sticky="ew", pady=(9, 0))
+        tk.Label(
+            reasoning,
+            text="추론 강도",
+            bg="#F7FBF9",
+            fg=self.INK,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(0, 9))
+        self.ai_reasoning_selector = ttk.Combobox(
+            reasoning,
+            textvariable=self.ai_reasoning_effort,
+            values=("기본 (서버 설정)", "medium", "low", "none"),
+            state="readonly",
+            width=18,
+        )
+        self.ai_reasoning_selector.pack(side="left")
+        tk.Label(
+            reasoning,
+            text="기본은 서버 설정을 그대로 사용합니다. 선택값은 이번 요청에만 적용하며 자동 변경·재시도하지 않습니다.",
+            bg="#F7FBF9",
+            fg=self.MUTED,
+            font=("Segoe UI", 8),
+            justify="left",
+        ).pack(side="left", padx=(10, 0))
+
         self.ai_context_frame = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
-        self.ai_context_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.ai_context_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         self.ai_context_frame.grid_columnconfigure(0, weight=1)
         tk.Label(
             self.ai_context_frame,
@@ -1563,7 +1552,7 @@ class TalkTrackerApp(tk.Tk):
         self.ai_speaker_guide_frame.grid_columnconfigure(1, weight=1)
 
         ai_actions = tk.Frame(self.ai_refinement_frame, bg="#F7FBF9")
-        ai_actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        ai_actions.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         ai_actions.grid_columnconfigure(0, weight=1)
         ai_status = tk.Frame(ai_actions, bg="#EDF9F5", padx=11, pady=7)
         ai_status.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 7))
@@ -1622,6 +1611,7 @@ class TalkTrackerApp(tk.Tk):
         input_state = "disabled" if self.ai_refinement_running else "normal"
         for button in getattr(self, "ai_choice_buttons", []):
             button.configure(state=input_state)
+        self.ai_reasoning_selector.configure(state="disabled" if self.ai_refinement_running else "readonly")
         self.ai_background_input.configure(
             state=input_state,
             takefocus=not self.ai_refinement_running,
@@ -1732,6 +1722,7 @@ class TalkTrackerApp(tk.Tk):
         self.ai_progress.grid_remove()
         self.ai_include_refined.set(False)
         self.ai_include_summary.set(False)
+        self.ai_reasoning_effort.set("기본 (서버 설정)")
         self.ai_background_input.configure(state="normal")
         self.ai_background_input.delete("1.0", "end")
         self.ai_status_text.set("분석 전에도 만들 결과와 안내를 미리 선택할 수 있습니다.")
@@ -1766,6 +1757,12 @@ class TalkTrackerApp(tk.Tk):
             return
         request = AIRefinementRequest(
             selection=selection,
+            reasoning_effort={
+                "기본 (서버 설정)": "default",
+                "medium": "medium",
+                "low": "low",
+                "none": "none",
+            }.get(self.ai_reasoning_effort.get(), "default"),
             background=self.ai_background_input.get("1.0", "end-1c"),
             speaker_guides=tuple(
                 SpeakerGuide(

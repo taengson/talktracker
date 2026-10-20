@@ -48,6 +48,7 @@ class _FakeClient:
         on_length_retry_success=None,
         on_reasoning_effort_fallback=None,
         on_reasoning_effort_lowered=None,
+        allow_reasoning_effort_fallback: bool = True,
         should_cancel=None,
     ) -> str:
         self.request = {
@@ -59,6 +60,7 @@ class _FakeClient:
             "reasoning_effort": reasoning_effort,
             "reasoning_effort_retry_levels": reasoning_effort_retry_levels,
             "retry_on_length": retry_on_length,
+            "allow_reasoning_effort_fallback": allow_reasoning_effort_fallback,
             "on_length_retry_success": on_length_retry_success,
         }
         if should_cancel and should_cancel():
@@ -246,6 +248,8 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertTrue(all(request["max_tokens"] is None for request in client.requests))
         self.assertTrue(all(request["retry_on_length"] is False for request in client.requests))
         self.assertTrue(all(request["reasoning_effort_retry_levels"] == () for request in client.requests))
+        self.assertTrue(all(request["reasoning_effort"] is None for request in client.requests))
+        self.assertTrue(all(request["allow_reasoning_effort_fallback"] is False for request in client.requests))
         self.assertTrue(all(len(request["messages"]) == 1 for request in client.requests))
         self.assertTrue(all("[첨부 파일:" in request["messages"][0]["content"] for request in client.requests))
         self.assertTrue(all("[첨부 파일 끝]" in request["messages"][0]["content"] for request in client.requests))
@@ -383,7 +387,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertEqual(client.request["max_tokens"], 4_096)
         self.assertIn("이전에 확인한 응답 길이 설정", progress[0])
 
-    def test_automatic_reasoning_starts_at_medium_effort(self) -> None:
+    def test_legacy_structured_path_passes_an_explicit_reasoning_effort(self) -> None:
         client = _FakeClient(
             {
                 "segments": [
@@ -409,7 +413,7 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
         self.assertIn("중간 추론 강도", progress[0])
 
-    def test_attachment_policy_uses_auto_reasoning_even_for_a_verified_reasoning_model(self) -> None:
+    def test_attachment_policy_uses_the_selected_reasoning_effort_without_fallback(self) -> None:
         client = _FakeClient(
             {
                 "segments": [
@@ -419,15 +423,26 @@ class TranscriptRefinerTests(unittest.TestCase):
             }
         )
         manager = AIRefinementManager(_ReasoningConnectionManager(client, auto_lower_on_length=False))
-        manager.start(_analysis(), AIRefinementRequest(selection=ResultSelection(refined=True)))
+        manager.start(
+            _analysis(),
+            AIRefinementRequest(selection=ResultSelection(refined=True), reasoning_effort="low"),
+        )
         deadline = time.monotonic() + 1
         while manager.snapshot().active and time.monotonic() < deadline:
             time.sleep(0.01)
 
         self.assertEqual(manager.snapshot().state, "completed")
         assert client.request is not None
-        self.assertIsNone(client.request["reasoning_effort"])
+        self.assertEqual(client.request["reasoning_effort"], "low")
         self.assertEqual(client.request["reasoning_effort_retry_levels"], ())
+        self.assertFalse(client.request["allow_reasoning_effort_fallback"])
+
+    def test_request_rejects_an_unknown_reasoning_effort(self) -> None:
+        with self.assertRaisesRegex(RefinementError, "기본, medium, low, none"):
+            AIRefinementRequest(
+                selection=ResultSelection(refined=True),
+                reasoning_effort="xhigh",
+            ).normalized()
 
     def test_long_transcript_is_chunked_and_its_results_are_merged(self) -> None:
         client = _ChunkingFakeClient()

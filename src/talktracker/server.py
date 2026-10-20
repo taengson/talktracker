@@ -29,6 +29,8 @@ from .core.jobs import JobManager, JobNotFoundError, JobStateError
 from .core.refinement import (
     AIRefinementRequest,
     AIRefinementResult,
+    REASONING_EFFORT_CHOICES,
+    REASONING_EFFORT_DEFAULT,
     RefinementError,
     ResultSelection,
     SpeakerGuide,
@@ -100,7 +102,15 @@ async def _read_refinement_request(request: Request) -> AIRefinementRequest:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="결과 선택 형식이 올바르지 않습니다.")
     background = payload.get("background", "")
     guides_raw = payload.get("speaker_guides", [])
-    if not isinstance(background, str) or len(background) > 20_000 or not isinstance(guides_raw, list) or len(guides_raw) > 100:
+    reasoning_effort = payload.get("reasoning_effort", REASONING_EFFORT_DEFAULT)
+    if (
+        not isinstance(background, str)
+        or len(background) > 20_000
+        or not isinstance(guides_raw, list)
+        or len(guides_raw) > 100
+        or not isinstance(reasoning_effort, str)
+        or reasoning_effort.strip().lower() not in REASONING_EFFORT_CHOICES
+    ):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="AI 정리 입력 길이 또는 형식이 올바르지 않습니다.")
     guides: list[SpeakerGuide] = []
     for item in guides_raw:
@@ -118,6 +128,7 @@ async def _read_refinement_request(request: Request) -> AIRefinementRequest:
             selection=ResultSelection(**values),
             background=background,
             speaker_guides=tuple(guides),
+            reasoning_effort=reasoning_effort,
         ).normalized()
     except RefinementError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
@@ -345,6 +356,9 @@ def _index_page(
       <label class="choice"><input id="ai-refined" type="checkbox"><span><strong>다듬은 대화</strong><span class="choice-description">AI가 말투와 오탈자를 다듬어 읽기 쉬운 대화로 만듭니다. 요약과 함께 선택할 수 있습니다.</span></span></label>
       <label class="choice"><input id="ai-summary" type="checkbox"><span><strong>요약</strong><span class="choice-description">AI가 핵심 내용, 결정 사항, 할 일을 짧게 정리합니다. 다듬은 대화와 함께 선택할 수 있습니다.</span></span></label>
     </div>
+    <label for="ai-reasoning">추론 강도</label>
+    <select id="ai-reasoning"><option value="default">기본 (서버 설정)</option><option value="medium">medium</option><option value="low">low</option><option value="none">none</option></select>
+    <p class="hint">기본은 서버의 모델 설정을 그대로 사용합니다. medium·low·none은 이번 결과 만들기 요청에만 적용하며, 자동으로 바꾸거나 다시 시도하지 않습니다.</p>
     <div id="ai-context" class="hidden">
       <label for="ai-background">대화의 목적·배경 안내 (선택)</label>
       <textarea id="ai-background" maxlength="20000" placeholder="회의 목적, 참여자 역할, 프로젝트명, 약어·고유명사를 자세히 적으면 전사 보정과 요약이 더 정확해집니다. 입력한 내용도 로컬 AI 서버에만 전달됩니다."></textarea>
@@ -360,7 +374,7 @@ def _index_page(
   <section><h2>이 서버의 최근 작업</h2><div id="jobs" class="hint">불러오는 중…</div></section>
 </main>
 <script>
-  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [], aiResultInputSelectionSummary = "", llmReasoningSupported = false;
+  let activeId = null, events = null, polling = null, refinementPolling = null, profiles = [], aiRefinementActive = false, aiResultView = "", aiResultSections = {}, aiResultWarnings = [], aiResultInputSelectionSummary = "";
   const $ = (id) => document.getElementById(id);
   const escapeHtml = (text) => String(text ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
   const token = () => $("token")?.value.trim() || "";
@@ -401,7 +415,7 @@ def _index_page(
     }
   }
   function setAiInputsLocked(locked) {
-    ["ai-refined", "ai-summary", "ai-background"].forEach((id) => $(id).disabled = locked);
+    ["ai-refined", "ai-summary", "ai-reasoning", "ai-background"].forEach((id) => $(id).disabled = locked);
     $("ai-speaker-guides").querySelectorAll("input[data-speaker-name], input[data-speaker-guidance]").forEach((input) => input.disabled = locked);
   }
   function prepareAiControls(job) {
@@ -412,6 +426,7 @@ def _index_page(
     $("ai-results").innerHTML = "";
     $("ai-refined").checked = false;
     $("ai-summary").checked = false;
+    $("ai-reasoning").value = "default";
     $("ai-status").textContent = "원본 전사는 준비되었습니다. 다듬은 대화 또는 요약을 선택해 만들 수 있습니다.";
     const speakers = [...new Set((job.speaker_segments || []).map((segment) => String(segment.speaker)).filter(Boolean))];
     $("ai-speaker-guides").innerHTML = speakers.length ? `<label>화자 이름·역할 (선택)</label>${speakers.map((speaker) => `<div class="speaker-guide" data-speaker="${escapeHtml(speaker)}"><label>${escapeHtml(speaker)}</label><div class="speaker-guide-inputs"><input data-speaker-name type="text" maxlength="200" placeholder="표시 이름 · 예: 화자 A"><input data-speaker-guidance type="text" maxlength="2000" placeholder="역할·안내 · 예: 회의 진행"></div></div>`).join("")}` : "";
@@ -468,7 +483,7 @@ def _index_page(
     const selection = {refined:$("ai-refined").checked, summary:$("ai-summary").checked};
     if (!selection.refined && !selection.summary) throw new Error("다듬은 대화 또는 요약을 하나 이상 선택해 주세요.");
     const speaker_guides = [...$("ai-speaker-guides").querySelectorAll(".speaker-guide[data-speaker]")].map((row) => ({speaker:row.dataset.speaker, display_name:row.querySelector("input[data-speaker-name]").value, guidance:row.querySelector("input[data-speaker-guidance]").value}));
-    return {selection, background:$("ai-background").value, speaker_guides};
+    return {selection, reasoning_effort:$("ai-reasoning").value, background:$("ai-background").value, speaker_guides};
   }
   async function startAiRefinement() {
     if (!activeId) return;
@@ -539,14 +554,7 @@ def _index_page(
     if (includeModel) { input.model = $("llm-model").value.trim(); if (!input.model) throw new Error("연결을 확인할 모델을 선택하거나 직접 입력해 주세요."); }
     return input;
   }
-  function updateLlmReasoningControl(connection) {
-    llmReasoningSupported = false;
-    const checkbox = $("llm-auto-lower-reasoning");
-    checkbox.checked = false;
-    checkbox.disabled = true;
-    $("llm-reasoning-hint").textContent = "Agent Chat 첨부 문서 정책과 같이 추론 강도는 자동(auto)으로 두며, 응답 중 자동 조정하지 않습니다.";
-  }
-  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); $("llm-auto-lower-reasoning").disabled = true; }
+  function setLlmBusy(value) { $("llm-load-models").disabled = value; $("llm-verify").disabled = value; ["llm-url","llm-api-key","llm-model"].forEach((id) => $(id).disabled = value); }
   async function loadLlmConnection() {
     try {
       const connection = await request("/api/local-llm");
@@ -554,7 +562,6 @@ def _index_page(
       else if (!$("llm-url").value) $("llm-url").value = "http://127.0.0.1:8000";
       if (connection.model) $("llm-model").value = connection.model;
       setLlmRecentServers(connection.recent_base_urls || []);
-      updateLlmReasoningControl(connection);
       setLlmStatus(connection.message, false);
     } catch (error) { setLlmStatus(error.message, true); }
   }
@@ -575,21 +582,10 @@ def _index_page(
     try {
       const connection = await request("/api/local-llm/verify", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(input)});
       const suffix = connection.response_preview ? ` 응답: ${connection.response_preview}` : "";
-      updateLlmReasoningControl(connection);
-      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다. AI 정리에는 추론 강도 자동(auto)을 사용합니다.${suffix}`);
+      setLlmStatus(`연결되었습니다. 선택한 모델이 짧은 요청을 처리했습니다. 결과 만들기에서 이번 요청의 추론 강도를 선택할 수 있습니다.${suffix}`);
       setLlmRecentServers(connection.recent_base_urls || []);
       $("llm-api-key").value = "";
     } catch (error) { setLlmStatus(error.message, true); } finally { setLlmBusy(false); }
-  }
-  async function updateLlmReasoningPreference() {
-    const checkbox = $("llm-auto-lower-reasoning"), requested = checkbox.checked;
-    checkbox.disabled = true;
-    try {
-      const connection = await request("/api/local-llm/reasoning-effort", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({auto_lower_on_length:requested})});
-      updateLlmReasoningControl(connection);
-      setLlmStatus("AI 정리에는 추론 강도 자동(auto)을 사용하며, 응답 중 자동 조정하지 않습니다.");
-    } catch (error) { checkbox.checked = !requested; setLlmStatus(error.message, true); }
-    finally { checkbox.disabled = true; }
   }
   async function loadProfiles() {
     const data = await request("/api/profiles"); profiles = data.profiles;
@@ -609,7 +605,6 @@ def _index_page(
   async function loadJobs() { try { const data = await request("/api/jobs"); $("jobs").innerHTML = data.jobs.length ? data.jobs.slice(0,12).map((job) => `<div class="job"><strong>${escapeHtml(job.source_name)}</strong><br><span class="hint">${escapeHtml(job.state)} · ${job.progress}% · ${escapeHtml(job.message)}</span></div>`).join("") : "아직 요청한 작업이 없습니다."; } catch (error) { $("jobs").textContent = error.message; } }
   $("llm-load-models")?.addEventListener("click", loadLlmModels);
   $("llm-verify")?.addEventListener("click", verifyLlmConnection);
-  $("llm-auto-lower-reasoning")?.addEventListener("change", updateLlmReasoningPreference);
   ["ai-refined","ai-summary"].forEach((id) => $(id).addEventListener("change", updateAiContext));
   $("ai-run").addEventListener("click", startAiRefinement);
   $("ai-cancel").addEventListener("click", cancelAiRefinement);
@@ -631,7 +626,6 @@ def _index_page(
     <div><label for="llm-api-key">API 키 (선택)</label><input id="llm-api-key" type="password" autocomplete="off" placeholder="필요한 서버에서만 입력"></div></div>
     <div class="grid"><div><label for="llm-model">모델</label><input id="llm-model" type="text" list="llm-model-options" placeholder="모델 불러오기 또는 직접 입력"><datalist id="llm-model-options"></datalist></div>
     <div class="actions"><button id="llm-load-models" class="secondary" type="button">모델 불러오기</button><button id="llm-verify" type="button">연결 확인</button></div></div>
-    <label class="choice"><input id="llm-auto-lower-reasoning" type="checkbox" disabled><span><strong>추론 강도 자동 조정 (사용하지 않음)</strong><span id="llm-reasoning-hint" class="choice-description">AI 정리에는 자동(auto)을 사용합니다.</span></span></label>
     <p id="llm-status" class="notice">로컬 AI 연결 상태를 확인하고 있습니다…</p>
   </section>
     """.replace("__LOCAL_LLM_NETWORK_NOTICE__", local_llm_network_notice) if local_llm_available else ""
@@ -707,11 +701,10 @@ def create_app(
             )
 
     def local_llm_payload() -> dict[str, Any]:
-        """Return non-secret connection state, including the opt-in setting."""
+        """Return non-secret local AI connection state."""
 
         connection = local_llm_manager.snapshot()
         settings = connection.settings
-        reasoning = settings.reasoning_effort_settings_for(settings.base_url, settings.model)
         return {
             "configured": settings.is_configured,
             "connected": connection.connected,
@@ -719,11 +712,6 @@ def create_app(
             "base_url": settings.base_url,
             "model": settings.model,
             "recent_base_urls": list(settings.recent_base_urls),
-            "reasoning_effort": {
-                "supported": bool(reasoning and {"medium", "low"}.issubset(reasoning.supported_efforts)),
-                "supported_levels": list(reasoning.supported_efforts) if reasoning else [],
-                "auto_lower_on_length": bool(reasoning and reasoning.auto_lower_on_length),
-            },
         }
 
     def snapshot_or_404(job_id: str) -> dict[str, Any]:
@@ -813,24 +801,6 @@ def create_app(
         payload = local_llm_payload()
         payload.update({"model": result.model, "response_preview": result.response_preview})
         return payload
-
-    @app.post("/api/local-llm/reasoning-effort")
-    async def update_reasoning_effort_preference(
-        request: Request,
-        _: None = Depends(require_access),
-        _local: None = Depends(require_local_llm),
-    ) -> dict[str, Any]:
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError as error:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="추론 강도 설정 요청 형식이 올바르지 않습니다.") from error
-        if not isinstance(payload, dict) or not isinstance(payload.get("auto_lower_on_length"), bool):
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="추론 강도 자동 조정 값을 확인해 주세요.")
-        try:
-            local_llm_manager.set_auto_lower_reasoning_effort(payload["auto_lower_on_length"])
-        except LocalLLMError as error:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
-        return local_llm_payload()
 
     @app.get("/api/jobs/{job_id}/ai-refinement")
     def ai_refinement_status(
