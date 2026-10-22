@@ -21,6 +21,7 @@ from pathlib import Path
 from threading import RLock
 from time import monotonic
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -969,8 +970,16 @@ def create_app(
         job_id: str,
         kind: str,
         _: None = Depends(require_access),
-        _local: None = Depends(require_local_llm),
     ) -> Response:
+        """Download an already-created AI document without contacting the AI server.
+
+        AI results are retained in this application's job state.  Requiring the
+        local-AI feature flag here made an existing document unavailable simply
+        because that connection was no longer exposed.  Also, source recordings
+        commonly have Korean filenames: response headers are Latin-1, so a raw
+        filename in ``Content-Disposition`` raises an encoding error.  Keep an
+        ASCII fallback and use RFC 5987 encoding for the displayed filename.
+        """
         if kind not in {"original", "refined", "summary"}:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="요청한 결과 문서를 찾지 못했습니다.")
         try:
@@ -988,10 +997,14 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="선택하지 않은 결과 문서입니다.")
         label = {"original": "original", "refined": "refined", "summary": "summary"}[kind]
         filename = f"{Path(job['source_name']).stem}-{label}.md"
+        content_disposition = (
+            f'attachment; filename="talktracker-{label}.md"; '
+            f"filename*=UTF-8''{quote(filename, safe='')}"
+        )
         return Response(
             content,
             media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": content_disposition},
         )
 
     @app.delete("/api/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)

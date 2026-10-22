@@ -16,6 +16,7 @@ from talktracker.core.analysis import AnalysisResult, SpeakerSegment, Utterance
 from talktracker.core.llm_client import LocalLLMConnection, LocalLLMConnectionTest, LocalLLMModel
 from talktracker.core.llm_config import LocalLLMSettingsStore
 from talktracker.core.models import get_whisper_profile
+from talktracker.core.refinement import AIRefinementResult, ResultSelection
 from talktracker.core.workflow import LocalLLMConnectionManager
 from talktracker.server import _index_page, _model_download_command, create_app, main as server_main
 
@@ -407,6 +408,36 @@ class ServerPageTests(unittest.TestCase):
                     summary_document = client.get(f"/api/jobs/{job.id}/ai-results/summary.md")
                     self.assertEqual(summary_document.status_code, 200)
                     self.assertIn("# 요약", summary_document.text)
+            finally:
+                manager.shutdown()
+
+    def test_web_ai_result_download_supports_korean_filenames_without_an_active_ai_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = JobManager(root, engine_factory=lambda _root, _profile: RefinableFakeEngine())
+            try:
+                job = manager.create_upload_job("주간회의.m4a", "turbo")
+                job.source_path.write_bytes(b"recording")
+                manager.finish_upload(job.id, job.source_path.stat().st_size)
+                deadline = time.monotonic() + 3
+                while manager.snapshot(job.id)["state"] not in {"completed", "failed"} and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertEqual(manager.snapshot(job.id)["state"], "completed")
+
+                app = create_app(project_root=root, manager=manager, local_llm_enabled=False)
+                app.state.ai_refinement_results[job.id] = AIRefinementResult(
+                    selection=ResultSelection(summary=True),
+                    summary_document="# 요약\n\n테스트 요약입니다.\n",
+                )
+                with TestClient(app) as client:
+                    response = client.get(f"/api/jobs/{job.id}/ai-results/summary.md")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("# 요약", response.text)
+                disposition = response.headers["content-disposition"]
+                self.assertIn('filename="talktracker-summary.md"', disposition)
+                self.assertIn("filename*=UTF-8''", disposition)
+                self.assertNotIn("주간회의", disposition)
             finally:
                 manager.shutdown()
 
