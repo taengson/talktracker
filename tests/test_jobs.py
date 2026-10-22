@@ -151,6 +151,8 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual(completed["state"], "completed")
         self.assertEqual(completed["progress"], 100)
         self.assertTrue(completed["result_available"])
+        self.assertTrue(completed["timing_started"])
+        self.assertGreaterEqual(completed["elapsed_seconds"], 0)
         self.assertEqual(completed["speaker_segments"][0]["speaker"], "화자 1")
         self.assertIn("테스트 결과", self.manager.result_path(job.id).read_text(encoding="utf-8"))
 
@@ -238,6 +240,13 @@ class ServerPageTests(unittest.TestCase):
         page = _index_page()
         self.assertIn("'\"':\"&quot;\"", page)
         self.assertNotIn('"\\\\\"":"&quot;"', page)
+
+    def test_embedded_client_script_shows_elapsed_analysis_time(self) -> None:
+        page = _index_page()
+
+        self.assertIn('id="analysis-elapsed"', page)
+        self.assertIn("function setAnalysisTiming(job)", page)
+        self.assertIn("analysisTiming.running ? \"경과\" : \"총\"", page)
         self.assertIn('request("/api/profiles")', page)
         self.assertIn('event.preventDefault()', page)
         self.assertIn('function renderTimeline(segments, durationSeconds)', page)

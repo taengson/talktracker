@@ -80,6 +80,8 @@ class AnalysisJob:
     is_partial: bool = False
     cancel_requested: bool = False
     revision: int = 0
+    started_at: float | None = field(default=None, repr=False)
+    finished_at: float | None = field(default=None, repr=False)
     cancel_event: Event = field(default_factory=Event, repr=False)
     analysis_result: Any | None = field(default=None, repr=False)
 
@@ -284,6 +286,7 @@ class JobManager:
                 self._transition_locked(job, "cancelled", "분석 요청을 취소했습니다.")
                 self._persist_locked(job)
                 return
+            job.started_at = time.monotonic()
             self._transition_locked(job, "running", "로컬 분석을 시작하고 있습니다.")
             self._persist_locked(job)
 
@@ -304,6 +307,7 @@ class JobManager:
                 if not job:
                     return
                 job.error = str(error).strip() or type(error).__name__
+                job.finished_at = time.monotonic()
                 self._transition_locked(job, "failed", "음성 파일을 처리하지 못했습니다.")
                 self._persist_locked(job)
             return
@@ -315,6 +319,7 @@ class JobManager:
             job.analysis_result = result
             job.result_path = result_path
             job.is_partial = bool(getattr(result, "is_partial", False))
+            job.finished_at = time.monotonic()
             if job.is_partial or job.cancel_event.is_set():
                 self._transition_locked(job, "cancelled", "중단 시점까지의 결과를 저장했습니다.")
             else:
@@ -376,6 +381,10 @@ class JobManager:
                 queue_position = self._queue_order.index(job.id) + 1
             except ValueError:
                 queue_position = None
+        elapsed_seconds = 0
+        if job.started_at is not None:
+            ended_at = job.finished_at if job.finished_at is not None else time.monotonic()
+            elapsed_seconds = max(0, round(ended_at - job.started_at))
         return {
             "id": job.id,
             "source_name": job.source_name,
@@ -390,6 +399,8 @@ class JobManager:
             "result_available": bool(job.result_path and job.result_path.is_file()),
             "is_partial": job.is_partial,
             "cancel_requested": job.cancel_requested,
+            "timing_started": job.started_at is not None,
+            "elapsed_seconds": elapsed_seconds,
             "queue_position": queue_position,
             "created_at": job.created_at,
             "updated_at": job.updated_at,

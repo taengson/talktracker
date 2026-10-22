@@ -321,7 +321,7 @@ def _index_page(
     button.secondary { color:var(--ink); background:#fff; border-color:#a9bbb7; } button.danger { color:#fff; background:var(--danger); border-color:var(--danger); }
     button:disabled { opacity:.55; cursor:wait; } .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .actions { display:flex; gap:9px; align-items:center; margin-top:17px; } .field-label { display:block; margin:12px 0 5px; font-weight:650; }
     .hint { color:var(--muted); font-size:13px; } .notice { padding:10px 12px; border-radius:8px; background:var(--mint); color:#1e6655; } .error { color:var(--danger); background:#fbecec; }
-    .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; } .ai-activity { display:flex; gap:8px; align-items:center; margin-top:16px; } .ai-activity-message { flex:1; } .ai-elapsed { color:#47746a; font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; } #ai-progress { margin-top:7px; } #ai-progress.running > div { width:34%; animation:ai-progress 1.2s ease-in-out infinite; } @keyframes ai-progress { from { transform:translateX(-120%); } to { transform:translateX(360%); } }
+    .hidden { display:none; } .progress { height:10px; overflow:hidden; border-radius:999px; background:#e6efed; } .progress > div { height:100%; width:0; background:var(--teal); transition:width .2s; } .activity { display:flex; gap:8px; align-items:center; } .activity-message { flex:1; } .elapsed { color:#47746a; font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; } .ai-activity { margin-top:16px; } #ai-progress { margin-top:7px; } #ai-progress.running > div { width:34%; animation:ai-progress 1.2s ease-in-out infinite; } @keyframes ai-progress { from { transform:translateX(-120%); } to { transform:translateX(360%); } }
     dl { display:grid; grid-template-columns:126px 1fr; gap:6px 14px; margin:16px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-word; }
     .timeline { margin-top:18px; padding:14px; border:1px solid var(--line); border-radius:9px; background:#f9fbfa; overflow-x:auto; } .timeline-title { margin:0 0 9px; font-size:13px; font-weight:750; } .timeline-scale { display:flex; justify-content:space-between; margin:0 3px 5px 88px; color:var(--muted); font-size:11px; } .speaker-lane { display:grid; grid-template-columns:76px minmax(420px, 1fr); gap:10px; align-items:center; min-width:560px; margin:5px 0; } .speaker-label { overflow:hidden; color:var(--muted); font-size:12px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .speaker-track { position:relative; height:14px; border-radius:4px; background:repeating-linear-gradient(90deg,#e8efed 0,#e8efed calc(10% - 1px),#dfe9e6 calc(10% - 1px),#dfe9e6 10%); } .speaker-turn { position:absolute; top:2px; height:10px; min-width:2px; border-radius:3px; box-shadow:0 1px 1px rgb(16 54 64 / 18%); } .timeline-empty { color:var(--muted); font-size:13px; }
     .profile-options { display:grid; gap:8px; } .profile-option { display:grid; grid-template-columns:auto 1fr; gap:3px 9px; align-items:start; margin:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; cursor:pointer; } .profile-option:hover { border-color:#77ada4; background:#f7fbf9; } .profile-option input { width:auto; min-height:auto; margin:5px 0 0; } .profile-option strong { display:block; } .profile-option .choice-description { grid-column:2; } .profile-option.unavailable { opacity:.62; cursor:not-allowed; background:#f7f7f7; }
@@ -346,7 +346,7 @@ def _index_page(
     <div id="server-setup" class="notice error hidden" role="status"></div>
   </section>
   <section id="current" class="hidden">
-    <h2>현재 작업</h2><div id="current-notice" class="notice"></div><div class="progress" aria-label="분석 진행률"><div id="progress-bar"></div></div>
+    <h2>현재 작업</h2><div id="current-notice" class="notice activity" role="status"><span aria-hidden="true">●</span><span id="current-message" class="activity-message"></span><strong id="analysis-elapsed" class="elapsed"></strong></div><div class="progress" aria-label="분석 진행률"><div id="progress-bar"></div></div>
     <dl id="details"></dl><div id="timeline" class="timeline"></div><div class="actions"><button id="cancel" class="danger" type="button">중단</button><a id="result" class="hidden" download>원본 전사 문서 다운로드</a></div>
   </section>
   <section id="ai-refinement" class="hidden">
@@ -366,7 +366,7 @@ def _index_page(
       <p class="hint">입력한 화자 이름은 다듬은 대화의 화자 표시에 적용됩니다. 역할·안내는 AI가 문맥을 이해하는 보조 정보입니다.</p>
       <div id="ai-speaker-guides"></div>
     </div>
-    <div id="ai-activity" class="notice ai-activity hidden" role="status"><span aria-hidden="true">●</span><span id="ai-activity-message" class="ai-activity-message"></span><strong id="ai-elapsed" class="ai-elapsed"></strong></div>
+    <div id="ai-activity" class="notice activity ai-activity hidden" role="status"><span aria-hidden="true">●</span><span id="ai-activity-message" class="activity-message"></span><strong id="ai-elapsed" class="elapsed"></strong></div>
     <div id="ai-progress" class="progress hidden" aria-label="AI 정리 진행 중"><div></div></div>
     <div class="actions"><button id="ai-run" type="button">선택한 결과 만들기</button><button id="ai-cancel" class="danger hidden" type="button">AI 정리 중단</button></div>
     <p id="ai-status" class="notice">분석이 끝나면 결과를 선택할 수 있습니다.</p>
@@ -388,8 +388,22 @@ def _index_page(
     return response.status === 204 ? null : response.json();
   }
   function duration(value) { if (value == null) return "-"; const total = Math.max(0, Math.round(value)); return `${String(Math.floor(total / 60)).padStart(2,"0")}:${String(total % 60).padStart(2,"0")}`; }
+  let analysisTiming = null, analysisTimer = null;
+  function stopAnalysisTimer() { if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; } }
+  function renderAnalysisElapsed() {
+    if (!analysisTiming) { $("analysis-elapsed").textContent = ""; return; }
+    const seconds = analysisTiming.running ? analysisTiming.elapsed + Math.floor((Date.now() - analysisTiming.observedAt) / 1000) : analysisTiming.elapsed;
+    $("analysis-elapsed").textContent = `${analysisTiming.running ? "경과" : "총"} ${duration(seconds)}`;
+  }
+  function setAnalysisTiming(job) {
+    if (!job.timing_started) { analysisTiming = null; stopAnalysisTimer(); renderAnalysisElapsed(); return; }
+    const running = job.state === "running";
+    analysisTiming = {elapsed:Math.max(0, Number(job.elapsed_seconds) || 0), observedAt:Date.now(), running};
+    renderAnalysisElapsed(); stopAnalysisTimer();
+    if (running) analysisTimer = setInterval(renderAnalysisElapsed, 1000);
+  }
   function render(job) {
-    activeId = job.id; $("current").classList.remove("hidden"); $("current-notice").textContent = job.error || job.message; $("current-notice").classList.toggle("error", job.state === "failed");
+    activeId = job.id; $("current").classList.remove("hidden"); $("current-message").textContent = job.error || job.message; $("current-notice").classList.toggle("error", job.state === "failed"); setAnalysisTiming(job);
     $("progress-bar").style.width = `${job.progress}%`;
     $("details").innerHTML = `<dt>파일</dt><dd>${escapeHtml(job.source_name)}</dd><dt>상태</dt><dd>${escapeHtml(job.state)}${job.queue_position ? ` · 대기 ${job.queue_position}번` : ""}</dd><dt>전사 품질</dt><dd>${escapeHtml(job.whisper_profile)}</dd><dt>진행률</dt><dd>${job.progress}%</dd><dt>녹음 길이</dt><dd>${duration(job.duration_seconds)}</dd>`;
     renderTimeline(job.speaker_segments || [], job.duration_seconds);
