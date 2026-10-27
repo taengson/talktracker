@@ -735,7 +735,7 @@ class AnalysisEngine:
 
     @staticmethod
     def _speaker_for_chunk(chunk: TranscriptChunk, speaker_segments: list[SpeakerSegment]) -> str:
-        best_speaker = "알 수 없음"
+        best_speaker = "화자 알 수 없음"
         best_overlap = 0.0
         for segment in speaker_segments:
             overlap = max(0.0, min(chunk.end, segment.end) - max(chunk.start, segment.start))

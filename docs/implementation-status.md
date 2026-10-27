@@ -44,6 +44,8 @@
 3. 사용자가 고른 Whisper 모델을 CTranslate2 형식으로 실행합니다. Windows는 원본 모델을 로컬에서 변환하고, macOS·Linux는 준비된 CTranslate2 모델을 직접 받습니다. Windows·Linux에서 CUDA GPU가 준비되면 Small·Turbo는 GPU `float16`을 우선 사용하고, 그렇지 않으면 CPU `int8`을 사용합니다. GPU 로드가 실패하면 Small·Turbo는 CPU로 자동 전환합니다. Large-v3는 CUDA GPU `float16` 전용이며 Linux에서는 구간 단위 시간으로 화자를 연결합니다.
 4. 전사 구간과 화자 구간의 시간대를 겹쳐 화자별 대화 기록으로 만듭니다.
 
+전사 구간에 겹치는 화자 구간이 없으면 `화자 알 수 없음`으로 표시합니다. 반대로 화자 구간만 있고 전사 구간이 없는 경우에는 타임라인에만 나타나며 대화 문서에 별도 전사 항목을 만들지 않습니다.
+
 ## 모델과 저장 위치
 
 모든 모델은 프로젝트 내부 `models` 폴더를 사용합니다.

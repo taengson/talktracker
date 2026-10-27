@@ -10,6 +10,7 @@
 
 - M4A, MP3, WAV, FLAC, AAC, OGG 음성 파일 선택
 - Nemotron 기반 화자 구간 분리
+- 화자 구간에 연결되지 않은 전사문은 `화자 알 수 없음`으로 표시하며, 전사문이 없는 화자 구간은 타임라인에서 확인
 - 전사 목적에 따라 Whisper Small 또는 Large-v3 Turbo 선택
 - 호환 CUDA GPU를 감지하면 Small·Turbo도 GPU `float16`으로 자동 전사하고, 사용할 수 없으면 CPU `int8`으로 자동 전환
 - 호환 CUDA GPU가 있을 때 Whisper Large-v3 최고 정확도 모드 선택
