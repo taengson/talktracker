@@ -1774,7 +1774,16 @@ class TalkTrackerApp(tk.Tk):
             ),
         )
         try:
-            self.ai_refinement_manager.start(self.current_result, request)
+            prior_refined_document = (
+                render_refined_conversation(self.current_result, self.ai_refinement_result)
+                if self.ai_refinement_result and self.ai_refinement_result.selection.refined
+                else ""
+            )
+            self.ai_refinement_manager.start(
+                self.current_result,
+                request,
+                prior_refined_document=prior_refined_document,
+            )
         except AIRefinementBusyError as error:
             messagebox.showwarning(WINDOW_TITLE, str(error))
             return

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .analysis import AnalysisResult, Utterance
 
 
-PROMPT_VERSION = "2026-10-20.5"
+PROMPT_VERSION = "2026-10-27.1"
 ProgressCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 LengthRetrySuccessCallback = Callable[[int], None]
@@ -204,6 +204,7 @@ class TranscriptRefiner:
         request: AIRefinementRequest,
         *,
         model: str,
+        prior_refined_document: str = "",
         response_token_limit: int | None = None,
         reasoning_effort: str | None = None,
         reasoning_effort_fallback_levels: tuple[str, ...] = (),
@@ -222,7 +223,7 @@ class TranscriptRefiner:
         self._raise_if_cancelled(should_cancel)
 
         original_document = render_original_conversation(analysis)
-        if self.document_first:
+        if self.document_first or (normalized.selection.summary and prior_refined_document.strip()):
             # Keep the generated transcript in a real, short-lived Markdown
             # file while it is treated as a chat attachment.  The context
             # manager removes both the file and its private directory after a
@@ -239,6 +240,7 @@ class TranscriptRefiner:
                     attachment_name=_transcript_attachment_name(analysis.source_name),
                     attachment_source=attachment_source,
                     attachment_chunks=create_attachment_chunks(attachment_source),
+                    prior_refined_document=prior_refined_document.strip(),
                     model=model,
                     reasoning_effort=normalized.requested_reasoning_effort,
                     progress=progress,
@@ -310,6 +312,7 @@ class TranscriptRefiner:
         attachment_name: str,
         attachment_source: str,
         attachment_chunks: tuple[AttachmentChunk, ...],
+        prior_refined_document: str,
         model: str,
         reasoning_effort: str | None,
         progress: ProgressCallback | None,
@@ -318,22 +321,28 @@ class TranscriptRefiner:
         """Create free-form result documents through the Agent Chat flow."""
 
         if progress:
-            progress("AI에 전사문을 첨부 문서로 전달하고 있습니다…")
+            source_label = (
+                "다듬은 대화"
+                if request.selection.summary and not request.selection.refined and prior_refined_document.strip()
+                else "전사문"
+            )
+            progress(f"AI에 {source_label}을 첨부 문서로 전달하고 있습니다…")
 
         selection_summaries: list[str] = []
 
-        def messages_for(mode: str) -> list[dict[str, str]]:
+        def messages_for(mode: str, source: str, source_name: str) -> list[dict[str, str]]:
             query = self._document_user_request(request, mode=mode)
+            chunks = attachment_chunks if source == attachment_source else create_attachment_chunks(source)
             selection = select_attachment_content(
-                attachment_source,
-                attachment_chunks,
+                source,
+                chunks,
                 query,
                 MAX_ATTACHMENT_CONTENT_BYTES,
             )
             if selection.selection_summary:
                 selection_summaries.append(selection.selection_summary)
             return self._document_messages(
-                attachment_name,
+                source_name,
                 selection.content,
                 query,
             )
@@ -344,18 +353,29 @@ class TranscriptRefiner:
                 progress(_document_progress_message("AI가 전사문을 다듬은 대화 문서로 만들고 있습니다", reasoning_effort))
             refined_document = self._request_document(
                 model,
-                messages_for("refine"),
+                messages_for("refine", attachment_source, attachment_name),
                 reasoning_effort=reasoning_effort,
                 should_cancel=should_cancel,
             )
 
         summary_document = ""
         if request.selection.summary:
+            current_refined_document = refined_document.strip()
+            existing_refined_document = prior_refined_document.strip()
+            use_refined_source = bool(current_refined_document or existing_refined_document)
+            summary_source = current_refined_document or existing_refined_document or attachment_source
+            if len(summary_source.encode("utf-8")) > MAX_ATTACHMENT_FILE_BYTES:
+                raise RefinementError(
+                    "요약에 사용할 다듬은 대화가 첨부 문서 한도(5MiB)를 넘었습니다. "
+                    "다듬은 대화의 길이를 줄인 뒤 다시 시도해 주세요."
+                )
+            summary_name = _refined_attachment_name(attachment_name) if use_refined_source else attachment_name
             if progress:
-                progress(_document_progress_message("AI가 전사문 전체를 요약 문서로 만들고 있습니다", reasoning_effort))
+                source_label = "다듬은 대화" if use_refined_source else "전사문"
+                progress(_document_progress_message(f"AI가 {source_label}을 요약 문서로 만들고 있습니다", reasoning_effort))
             summary_document = self._request_document(
                 model,
-                messages_for("summary"),
+                messages_for("summary", summary_source, summary_name),
                 reasoning_effort=reasoning_effort,
                 should_cancel=should_cancel,
             )
@@ -392,10 +412,10 @@ class TranscriptRefiner:
             )
             output = "다듬은 대화 본문만 Markdown으로 반환하세요. 설명, JSON, 코드 블록은 쓰지 마세요."
         else:
-            task = "전사문을 사실에 근거해 한국어 회의 요약으로 정리하세요. 전사문에 없는 사실은 만들지 마세요."
+            task = "제공된 대화 기록을 사실에 근거해 한국어 회의 요약으로 정리하세요. 내용에 없는 사실은 만들지 마세요."
             output = (
                 "Markdown으로 반환하세요. `## 개요`, `## 핵심 내용`, `## 결정 사항`, `## 할 일`, "
-                "`## 확인이 필요한 내용` 제목을 사용하고, 근거가 없는 항목은 '확인된 내용이 없습니다.'라고 적으세요."
+                "`## 확인이 필요한 내용` 제목을 사용하고, 근거가 없는 항목은 '제공된 대화에서 확인된 내용이 없습니다.'라고 적으세요."
             )
         return "\n\n".join(
             (
@@ -759,6 +779,15 @@ def _transcript_attachment_name(source_name: str) -> str:
 
     stem = Path(source_name).stem.strip() or "전사문"
     return f"{stem}-전사문.md"
+
+
+def _refined_attachment_name(transcript_attachment_name: str) -> str:
+    """Label a refined transcript attachment without exposing a file path."""
+
+    stem = Path(transcript_attachment_name).stem
+    if stem.endswith("-전사문"):
+        stem = stem[: -len("-전사문")]
+    return f"{stem}-다듬은대화.md"
 
 
 def _document_progress_message(message: str, reasoning_effort: str | None) -> str:

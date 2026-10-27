@@ -853,8 +853,18 @@ def create_app(
         try:
             # Capture a completed earlier pass before the manager state is
             # reused for this new refined-conversation or summary request.
-            stored_refinement_result(job_id, refinement_manager.snapshot())
-            state = refinement_manager.start(analysis, refinement_request, owner_id=job_id)
+            previous_result = stored_refinement_result(job_id, refinement_manager.snapshot())
+            prior_refined_document = (
+                render_refined_conversation(analysis, previous_result)
+                if previous_result and previous_result.selection.refined
+                else ""
+            )
+            state = refinement_manager.start(
+                analysis,
+                refinement_request,
+                owner_id=job_id,
+                prior_refined_document=prior_refined_document,
+            )
             # A small local model can finish before ``start`` returns.  Merge
             # that completed state now so this response never hides its new
             # document until the browser's next polling interval.

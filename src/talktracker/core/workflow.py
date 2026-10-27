@@ -278,6 +278,7 @@ class AIRefinementManager:
         request: AIRefinementRequest,
         *,
         owner_id: str | None = None,
+        prior_refined_document: str = "",
     ) -> AIRefinementState:
         request = request.normalized()
         with self._lock:
@@ -293,7 +294,7 @@ class AIRefinementManager:
             )
         Thread(
             target=self._run,
-            args=(analysis, request, cancel_event, owner_id),
+            args=(analysis, request, cancel_event, owner_id, prior_refined_document),
             name="talktracker-ai-refinement",
             daemon=True,
         ).start()
@@ -317,6 +318,7 @@ class AIRefinementManager:
         request: AIRefinementRequest,
         cancel_event: Event,
         owner_id: str | None,
+        prior_refined_document: str,
     ) -> None:
         acquired = False
         try:
@@ -333,6 +335,7 @@ class AIRefinementManager:
                 analysis,
                 request,
                 model=settings.model,
+                prior_refined_document=prior_refined_document,
                 reasoning_effort=request.requested_reasoning_effort,
                 progress=self._update_progress,
                 should_cancel=cancel_event.is_set,
